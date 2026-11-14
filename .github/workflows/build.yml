@@ -37,6 +37,7 @@ jobs:
           mkdir -p app/src/main/res/values
           mkdir -p app/src/main/res/drawable
           mkdir -p app/src/main/res/xml
+          mkdir -p app/src/main/res/menu
 
           cat > settings.gradle.kts << 'EOF'
           pluginManagement {
@@ -75,8 +76,8 @@ jobs:
                   applicationId = "com.gvineon550.smartblock"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 5
-                  versionName = "3.0"
+                  versionCode = 9
+                  versionName = "4.3"
               }
               signingConfigs {
                   create("release") {
@@ -105,7 +106,8 @@ jobs:
               implementation("androidx.constraintlayout:constraintlayout:2.1.4")
               implementation("com.squareup.okhttp3:okhttp:4.12.0")
               implementation("androidx.work:work-runtime-ktx:2.9.0")
-              implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0")
+              implementation("androidx.recyclerview:recyclerview:1.3.2")
+              implementation("androidx.fragment:fragment-ktx:1.6.2")
           }
           EOF
 
@@ -139,8 +141,7 @@ jobs:
                       android:permission="android.permission.BIND_VPN_SERVICE"
                       android:foregroundServiceType="specialUse"
                       android:exported="false">
-                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                          android:value="VPN DNS filter" />
+                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="VPN DNS filter" />
                       <intent-filter>
                           <action android:name="android.net.VpnService" />
                       </intent-filter>
@@ -155,9 +156,7 @@ jobs:
                       android:authorities="${applicationId}.fileprovider"
                       android:exported="false"
                       android:grantUriPermissions="true">
-                      <meta-data
-                          android:name="android.support.FILE_PROVIDER_PATHS"
-                          android:resource="@xml/file_paths" />
+                      <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
                   </provider>
               </application>
           </manifest>
@@ -165,9 +164,17 @@ jobs:
 
           cat > app/src/main/res/xml/file_paths.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
-          <paths>
-              <external-path name="external_files" path="." />
-          </paths>
+          <paths><external-path name="external_files" path="." /></paths>
+          EOF
+
+          cat > app/src/main/res/menu/bottom_nav_menu.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <menu xmlns:android="http://schemas.android.com/apk/res/android">
+              <item android:id="@+id/nav_home" android:icon="@android:drawable/ic_menu_compass" android:title="Главная"/>
+              <item android:id="@+id/nav_logs" android:icon="@android:drawable/ic_menu_sort_by_size" android:title="Логи"/>
+              <item android:id="@+id/nav_lists" android:icon="@android:drawable/ic_menu_agenda" android:title="Списки"/>
+              <item android:id="@+id/nav_settings" android:icon="@android:drawable/ic_menu_preferences" android:title="Настройки"/>
+          </menu>
           EOF
 
           cat > app/src/main/java/com/gvineon550/smartblock/App.kt << 'EOF'
@@ -187,21 +194,16 @@ jobs:
                   Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
                       val sw = StringWriter()
                       throwable.printStackTrace(PrintWriter(sw))
-                      getSharedPreferences("crash", Context.MODE_PRIVATE)
-                          .edit().putString("log", sw.toString()).apply()
+                      getSharedPreferences("crash", Context.MODE_PRIVATE).edit().putString("log", sw.toString()).apply()
                       defaultHandler?.uncaughtException(thread, throwable)
                   }
                   setupWorkers()
               }
-
               private fun setupWorkers() {
                   val constraints = Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
-                  
                   val watchdog = PeriodicWorkRequestBuilder<WatchdogWorker>(15, TimeUnit.MINUTES).build()
                   WorkManager.getInstance(this).enqueueUniquePeriodicWork("Watchdog", ExistingPeriodicWorkPolicy.KEEP, watchdog)
-
-                  val updateLists = PeriodicWorkRequestBuilder<UpdateWorker>(24, TimeUnit.HOURS)
-                      .setConstraints(constraints).build()
+                  val updateLists = PeriodicWorkRequestBuilder<UpdateWorker>(24, TimeUnit.HOURS).setConstraints(constraints).build()
                   WorkManager.getInstance(this).enqueueUniquePeriodicWork("UpdateLists", ExistingPeriodicWorkPolicy.KEEP, updateLists)
               }
           }
@@ -218,8 +220,7 @@ jobs:
           class BootReceiver : BroadcastReceiver() {
               override fun onReceive(context: Context, intent: Intent) {
                   if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
-                      val prefs = context.getSharedPreferences("smartblock", Context.MODE_PRIVATE)
-                      if (prefs.getBoolean("auto_start", false)) {
+                      if (context.getSharedPreferences("smartblock", Context.MODE_PRIVATE).getBoolean("auto_start", false)) {
                           ContextCompat.startForegroundService(context, Intent(context, DnsVpnService::class.java))
                       }
                   }
@@ -245,7 +246,6 @@ jobs:
                   return Result.success()
               }
           }
-
           class UpdateWorker(ctx: Context, params: WorkerParameters) : Worker(ctx, params) {
               override fun doWork(): Result {
                   try { HostsUpdater.update(applicationContext) } catch (e: Exception) {}
@@ -257,144 +257,465 @@ jobs:
           cat > app/src/main/java/com/gvineon550/smartblock/MainActivity.kt << 'EOF'
           package com.gvineon550.smartblock
 
-          import android.app.Activity
-          import android.app.AlertDialog
+          import android.os.Bundle
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.fragment.app.Fragment
+          import com.google.android.material.bottomnavigation.BottomNavigationView
+
+          class MainActivity : AppCompatActivity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+                  val nav = findViewById<BottomNavigationView>(R.id.bottom_nav)
+                  nav.setOnItemSelectedListener { item ->
+                      var fragment: Fragment? = null
+                      when (item.itemId) {
+                          R.id.nav_home -> fragment = HomeFragment()
+                          R.id.nav_logs -> fragment = LogsFragment()
+                          R.id.nav_lists -> fragment = ListsFragment()
+                          R.id.nav_settings -> fragment = SettingsFragment()
+                      }
+                      if (fragment != null) {
+                          supportFragmentManager.beginTransaction().replace(R.id.fragment_container, fragment).commit()
+                          true
+                      } else false
+                  }
+                  if (savedInstanceState == null) nav.selectedItemId = R.id.nav_home
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/gvineon550/smartblock/HostsSources.kt << 'EOF'
+          package com.gvineon550.smartblock
+
           import android.content.Context
+
+          object HostsSources {
+              data class Source(val name: String, val url: String, val description: String)
+
+              val DEFAULT_SOURCES = listOf(
+                  Source("StevenBlack", "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts", "Реклама, трекеры, малварь"),
+                  Source("AdGuard DNS", "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt", "Реклама и трекеры"),
+                  Source("AdAway", "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/hosts.txt", "Реклама (Android)"),
+                  Source("Peter Lowe", "https://pgl.yoyo.org/adservers/serverlist.php?hostformat=hosts&showintro=0&mimetype=plaintext", "Реклама и трекеры"),
+                  Source("URLHaus", "https://raw.githubusercontent.com/mitchellkrogza/Ultimate.Hosts.Blacklist/master/hosts/hosts0", "Малварь и фишинг")
+              )
+
+              private const val PREFS = "smartblock"
+              private const val KEY_ENABLED = "enabled_sources"
+              private const val KEY_CUSTOM = "custom_sources"
+
+              fun getEnabledNames(ctx: Context): Set<String> {
+                  return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                      .getStringSet(KEY_ENABLED, DEFAULT_SOURCES.map { it.name }.toSet()) ?: DEFAULT_SOURCES.map { it.name }.toSet()
+              }
+
+              fun isEnabled(ctx: Context, name: String): Boolean = getEnabledNames(ctx).contains(name)
+
+              fun setEnabled(ctx: Context, name: String, enabled: Boolean) {
+                  val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                  val current = prefs.getStringSet(KEY_ENABLED, DEFAULT_SOURCES.map { it.name }.toSet())?.toMutableSet() ?: mutableSetOf()
+                  if (enabled) current.add(name) else current.remove(name)
+                  prefs.edit().putStringSet(KEY_ENABLED, current).apply()
+              }
+
+              fun getCustomUrls(ctx: Context): Set<String> {
+                  return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(KEY_CUSTOM, emptySet()) ?: emptySet()
+              }
+
+              fun addCustomUrl(ctx: Context, url: String) {
+                  val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                  val current = prefs.getStringSet(KEY_CUSTOM, emptySet())?.toMutableSet() ?: mutableSetOf()
+                  current.add(url)
+                  prefs.edit().putStringSet(KEY_CUSTOM, current).apply()
+              }
+
+              fun removeCustomUrl(ctx: Context, url: String) {
+                  val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                  val current = prefs.getStringSet(KEY_CUSTOM, emptySet())?.toMutableSet() ?: mutableSetOf()
+                  current.remove(url)
+                  prefs.edit().putStringSet(KEY_CUSTOM, current).apply()
+              }
+
+              fun getActiveUrls(ctx: Context): List<String> {
+                  val enabled = getEnabledNames(ctx)
+                  return DEFAULT_SOURCES.filter { enabled.contains(it.name) }.map { it.url } + getCustomUrls(ctx)
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/gvineon550/smartblock/HomeFragment.kt << 'EOF'
+          package com.gvineon550.smartblock
+
+          import android.app.Activity
           import android.content.Intent
-          import android.net.Uri
           import android.net.VpnService
           import android.os.Bundle
           import android.os.Handler
           import android.os.Looper
-          import android.os.PowerManager
-          import android.provider.Settings
+          import android.view.LayoutInflater
           import android.view.View
-          import android.widget.*
-          import androidx.appcompat.app.AppCompatActivity
+          import android.view.ViewGroup
+          import android.widget.Button
+          import android.widget.TextView
+          import android.widget.Toast
           import androidx.appcompat.widget.SwitchCompat
-          import androidx.core.content.ContextCompat
+          import androidx.fragment.app.Fragment
           import kotlin.concurrent.thread
 
-          class MainActivity : AppCompatActivity() {
+          class HomeFragment : Fragment() {
               private val reqVpn = 100
-              private val prefs by lazy { getSharedPreferences("smartblock", Context.MODE_PRIVATE) }
-
-              override fun onCreate(savedInstanceState: Bundle?) {
-                  super.onCreate(savedInstanceState)
-                  setContentView(R.layout.activity_main)
-                  FilterEngine.loadDefaults(this)
-                  checkCrashLog()
-                  setupUI()
+              override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+                  return inflater.inflate(R.layout.fragment_home, container, false)
               }
-
-              private fun setupUI() {
-                  val swVpn = findViewById<SwitchCompat>(R.id.vpnSwitch)
-                  val swDoh = findViewById<SwitchCompat>(R.id.dohSwitch)
-                  val swAutoStart = findViewById<SwitchCompat>(R.id.autoStartSwitch)
-                  val spinnerDoh = findViewById<Spinner>(R.id.dohSpinner)
-                  val status = findViewById<TextView>(R.id.statusText)
-                  val stats = findViewById<TextView>(R.id.statsText)
-                  val logText = findViewById<TextView>(R.id.logText)
-                  val searchInput = findViewById<EditText>(R.id.searchInput)
-
-                  val providers = arrayOf("AdGuard", "Comss.one", "TurtleGuard", "OpenBLD", "Quad9")
-                  val adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, providers)
-                  spinnerDoh.adapter = adapter
-                  spinnerDoh.setSelection(prefs.getInt("doh_provider", 0))
-                  DnsVpnService.setDoHProvider(prefs.getInt("doh_provider", 0))
-
-                  spinnerDoh.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                      override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                          DnsVpnService.setDoHProvider(position)
-                          prefs.edit().putInt("doh_provider", position).apply()
-                      }
-                      override fun onNothingSelected(parent: AdapterView<*>?) {}
-                  }
-
-                  swVpn.isChecked = DnsVpnService.isRunning
-                  swDoh.isChecked = DnsVpnService.useDoH
-                  swAutoStart.isChecked = prefs.getBoolean("auto_start", false)
+              override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+                  val sw = view.findViewById<SwitchCompat>(R.id.vpnSwitch)
+                  val status = view.findViewById<TextView>(R.id.statusText)
+                  val stats = view.findViewById<TextView>(R.id.statsText)
+                  sw.isChecked = DnsVpnService.isRunning
                   status.text = if (DnsVpnService.isRunning) "🟢 Защита включена" else "⚪ Защита выключена"
 
-                  swVpn.setOnCheckedChangeListener { _, on ->
+                  sw.setOnCheckedChangeListener { _, on ->
                       if (on) {
-                          val intent = VpnService.prepare(this)
+                          val intent = VpnService.prepare(context)
                           if (intent != null) startActivityForResult(intent, reqVpn) else startVpn()
                       } else {
-                          stopService(Intent(this, DnsVpnService::class.java))
+                          requireContext().stopService(Intent(requireContext(), DnsVpnService::class.java))
                           DnsVpnService.isRunning = false
-                          prefs.edit().putBoolean("vpn_was_on", false).apply()
+                          requireContext().getSharedPreferences("smartblock", android.content.Context.MODE_PRIVATE).edit().putBoolean("vpn_was_on", false).apply()
                           status.text = "⚪ Защита выключена"
                       }
                   }
-
-                  swDoh.setOnCheckedChangeListener { _, on -> DnsVpnService.useDoH = on }
-                  swAutoStart.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("auto_start", on).apply() }
-
-                  findViewById<Button>(R.id.addButton).setOnClickListener {
-                      val d = findViewById<EditText>(R.id.domainInput).text.toString().trim().lowercase()
-                      if (d.isNotEmpty()) { FilterEngine.addBlocked(d, this); Toast.makeText(this, "Заблокирован", Toast.LENGTH_SHORT).show() }
+                  view.findViewById<Button>(R.id.updateButton).setOnClickListener {
+                      Toast.makeText(context, "Обновление запущено...", Toast.LENGTH_SHORT).show()
+                      thread { HostsUpdater.update(requireContext()) }
                   }
-                  findViewById<Button>(R.id.addWhiteButton).setOnClickListener {
-                      val d = findViewById<EditText>(R.id.domainInput).text.toString().trim().lowercase()
-                      if (d.isNotEmpty()) { FilterEngine.addWhitelist(d, this); Toast.makeText(this, "В белом списке", Toast.LENGTH_SHORT).show() }
-                  }
-                  findViewById<Button>(R.id.updateButton).setOnClickListener {
-                      thread { HostsUpdater.update(this) }
-                      Toast.makeText(this, "Обновление запущено", Toast.LENGTH_SHORT).show()
-                  }
-                  findViewById<Button>(R.id.checkUpdateButton).setOnClickListener {
-                      UpdateChecker.check(this) { res -> runOnUiThread { handleUpdate(res) } }
-                  }
-                  findViewById<Button>(R.id.batteryButton).setOnClickListener {
-                      val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                      if (!pm.isIgnoringBatteryOptimizations(packageName)) {
-                          startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply { data = Uri.parse("package:$packageName") })
-                      } else Toast.makeText(this, "Уже разрешено", Toast.LENGTH_SHORT).show()
-                  }
-
-                  searchInput.addTextChangedListener(object : android.text.TextWatcher {
-                      override fun afterTextChanged(s: android.text.Editable?) { logText.text = BlockLog.filter(s.toString()) }
-                      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-                      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {}
-                  })
-
                   val handler = Handler(Looper.getMainLooper())
                   handler.post(object : Runnable {
                       override fun run() {
-                          stats.text = "Заблокировано: ${DnsVpnService.blockedCount}"
-                          if (searchInput.text.isNullOrEmpty()) logText.text = BlockLog.getLog()
+                          stats.text = "Заблокировано запросов: ${DnsVpnService.blockedCount}"
+                          handler.postDelayed(this, 1000)
+                      }
+                  })
+              }
+              private fun startVpn() {
+                  androidx.core.content.ContextCompat.startForegroundService(requireContext(), Intent(requireContext(), DnsVpnService::class.java))
+                  DnsVpnService.isRunning = true
+                  requireContext().getSharedPreferences("smartblock", android.content.Context.MODE_PRIVATE).edit().putBoolean("vpn_was_on", true).apply()
+                  view?.findViewById<TextView>(R.id.statusText)?.text = "🟢 Защита включена"
+              }
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == reqVpn && resultCode == Activity.RESULT_OK) startVpn()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/gvineon550/smartblock/LogsFragment.kt << 'EOF'
+          package com.gvineon550.smartblock
+
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.view.LayoutInflater
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.EditText
+          import android.widget.TextView
+          import androidx.fragment.app.Fragment
+
+          class LogsFragment : Fragment() {
+              override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+                  return inflater.inflate(R.layout.fragment_logs, container, false)
+              }
+              override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+                  val logText = view.findViewById<TextView>(R.id.logText)
+                  val search = view.findViewById<EditText>(R.id.searchInput)
+                  val handler = Handler(Looper.getMainLooper())
+                  handler.post(object : Runnable {
+                      override fun run() {
+                          val q = search.text.toString()
+                          if (q.isEmpty()) logText.text = BlockLog.getLog() else logText.text = BlockLog.filter(q)
                           handler.postDelayed(this, 2000)
                       }
                   })
               }
+          }
+          EOF
 
-              private fun handleUpdate(res: UpdateChecker.UpdateResult) {
-                  when (res) {
-                      is UpdateChecker.UpdateResult.Available -> AlertDialog.Builder(this).setTitle("Доступно обновление").setMessage("Новая версия: ${res.version}. Скачать?")
-                          .setPositiveButton("Да") { _, _ -> UpdateChecker.download(this, res.url) }.setNegativeButton("Нет", null).show()
-                      is UpdateChecker.UpdateResult.Latest -> Toast.makeText(this, "Последняя версия", Toast.LENGTH_SHORT).show()
-                      is UpdateChecker.UpdateResult.Error -> Toast.makeText(this, "Ошибка: ${res.message}", Toast.LENGTH_SHORT).show()
+          cat > app/src/main/java/com/gvineon550/smartblock/ListsFragment.kt << 'EOF'
+          package com.gvineon550.smartblock
+
+          import android.content.Context
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.view.Gravity
+          import android.view.LayoutInflater
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.*
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.fragment.app.Fragment
+
+          class ListsFragment : Fragment() {
+              override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+                  return inflater.inflate(R.layout.fragment_lists, container, false)
+              }
+
+              override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+                  val input = view.findViewById<EditText>(R.id.domainInput)
+                  val blockBtn = view.findViewById<Button>(R.id.addBlockBtn)
+                  val whiteBtn = view.findViewById<Button>(R.id.addWhiteBtn)
+                  val bulkInput = view.findViewById<EditText>(R.id.bulkInput)
+                  val importBtn = view.findViewById<Button>(R.id.importBtn)
+                  val fileBtn = view.findViewById<Button>(R.id.fileBtn)
+                  val blockContainer = view.findViewById<LinearLayout>(R.id.blockListContainer)
+                  val whiteContainer = view.findViewById<LinearLayout>(R.id.whiteListContainer)
+
+                  fun parseAndAdd(text: String): Int {
+                      var count = 0
+                      text.lines().forEach { line ->
+                          val cleanLine = line.substringBefore('#').trim()
+                          if (cleanLine.isNotEmpty()) {
+                              val parts = cleanLine.split(Regex("\\s+"))
+                              val domain = if (parts.size >= 2) parts[1] else parts[0]
+                              if (domain.isNotEmpty() && domain.contains(".") && domain != "0.0.0.0" && domain != "127.0.0.1") {
+                                  FilterEngine.addBlocked(domain.lowercase(), requireContext())
+                                  count++
+                              }
+                          }
+                      }
+                      return count
+                  }
+
+                  fun refreshLists() {
+                      val p = requireContext().getSharedPreferences("smartblock", Context.MODE_PRIVATE)
+                      val b = p.getStringSet("user_block", emptySet()) ?: emptySet()
+                      val w = p.getStringSet("user_white", emptySet()) ?: emptySet()
+                      renderList(blockContainer, b, false, ::refreshLists)
+                      renderList(whiteContainer, w, true, ::refreshLists)
+                  }
+                  refreshLists()
+
+                  val filePicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri: Uri? ->
+                      if (uri != null) {
+                          try {
+                              val text = requireContext().contentResolver.openInputStream(uri)?.bufferedReader()?.use { it.readText() }
+                              if (text != null) {
+                                  val count = parseAndAdd(text)
+                                  refreshLists()
+                                  Toast.makeText(context, "Импортировано из файла: $count", Toast.LENGTH_SHORT).show()
+                              }
+                          } catch (e: Exception) {
+                              Toast.makeText(context, "Ошибка чтения файла", Toast.LENGTH_SHORT).show()
+                          }
+                      }
+                  }
+
+                  fileBtn.setOnClickListener {
+                      filePicker.launch(arrayOf("text/plain", "*/*"))
+                  }
+
+                  blockBtn.setOnClickListener {
+                      val d = input.text.toString().trim().lowercase()
+                      if (d.isNotEmpty()) { FilterEngine.addBlocked(d, requireContext()); input.text.clear(); refreshLists() }
+                  }
+                  whiteBtn.setOnClickListener {
+                      val d = input.text.toString().trim().lowercase()
+                      if (d.isNotEmpty()) { FilterEngine.addWhitelist(d, requireContext()); input.text.clear(); refreshLists() }
+                  }
+
+                  importBtn.setOnClickListener {
+                      val text = bulkInput.text.toString()
+                      val count = parseAndAdd(text)
+                      bulkInput.text.clear()
+                      refreshLists()
+                      Toast.makeText(context, "Импортировано доменов: $count", Toast.LENGTH_SHORT).show()
                   }
               }
 
-              private fun checkCrashLog() {
-                  val log = getSharedPreferences("crash", Context.MODE_PRIVATE).getString("log", null)
-                  if (log != null) {
-                      AlertDialog.Builder(this).setTitle("Упало в прошлый раз").setMessage(log.take(1000)).setPositiveButton("Ок") { _, _ -> getSharedPreferences("crash", Context.MODE_PRIVATE).edit().clear().apply() }.show()
+              private fun renderList(container: LinearLayout, set: Set<String>, isWhite: Boolean, onRefresh: () -> Unit) {
+                  container.removeAllViews()
+                  if (set.isEmpty()) {
+                      val tv = TextView(requireContext()).apply { text = "Пусто"; setTextColor(Color.GRAY); setPadding(0, 8, 0, 8) }
+                      container.addView(tv)
+                      return
+                  }
+                  set.sorted().forEach { domain ->
+                      val row = LinearLayout(requireContext()).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 8, 0, 8) }
+                      val tv = TextView(requireContext()).apply { text = domain; setTextColor(Color.WHITE); layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
+                      val btn = Button(requireContext()).apply {
+                          text = "✕"; setTextColor(Color.RED); setBackgroundColor(Color.TRANSPARENT); minWidth = 0; minimumWidth = 0
+                          setOnClickListener {
+                              val p = requireContext().getSharedPreferences("smartblock", Context.MODE_PRIVATE)
+                              val key = if (isWhite) "user_white" else "user_block"
+                              val cur = p.getStringSet(key, emptySet())?.toMutableSet() ?: mutableSetOf()
+                              cur.remove(domain)
+                              p.edit().putStringSet(key, cur).apply()
+                              if (isWhite) FilterEngine.removeWhitelist(domain) else FilterEngine.removeBlocked(domain)
+                              onRefresh()
+                          }
+                      }
+                      row.addView(tv)
+                      row.addView(btn)
+                      container.addView(row)
                   }
               }
+          }
+          EOF
 
-              private fun startVpn() {
-                  ContextCompat.startForegroundService(this, Intent(this, DnsVpnService::class.java))
-                  DnsVpnService.isRunning = true
-                  prefs.edit().putBoolean("vpn_was_on", true).apply()
-                  findViewById<TextView>(R.id.statusText).text = "🟢 Защита включена"
+          cat > app/src/main/java/com/gvineon550/smartblock/SettingsFragment.kt << 'EOF'
+          package com.gvineon550.smartblock
+
+          import android.app.AlertDialog
+          import android.content.Context
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.PowerManager
+          import android.provider.Settings
+          import android.view.Gravity
+          import android.view.LayoutInflater
+          import android.view.View
+          import android.view.ViewGroup
+          import android.widget.*
+          import androidx.appcompat.widget.SwitchCompat
+          import androidx.fragment.app.Fragment
+
+          class SettingsFragment : Fragment() {
+              override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View? {
+                  return inflater.inflate(R.layout.fragment_settings, container, false)
               }
+              override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+                  val prefs = requireContext().getSharedPreferences("smartblock", Context.MODE_PRIVATE)
+                  val swDoh = view.findViewById<SwitchCompat>(R.id.dohSwitch)
+                  val swAuto = view.findViewById<SwitchCompat>(R.id.autoStartSwitch)
+                  val spinner = view.findViewById<Spinner>(R.id.dohSpinner)
+                  val sourcesContainer = view.findViewById<LinearLayout>(R.id.sourcesContainer)
+                  val customUrlsContainer = view.findViewById<LinearLayout>(R.id.customUrlsContainer)
+                  val customUrlInput = view.findViewById<EditText>(R.id.customUrlInput)
+                  val addCustomBtn = view.findViewById<Button>(R.id.addCustomBtn)
+                  val cacheInfo = view.findViewById<TextView>(R.id.cacheInfo)
+                  val clearCacheBtn = view.findViewById<Button>(R.id.clearCacheBtn)
 
-              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-                  super.onActivityResult(requestCode, resultCode, data)
-                  if (requestCode == reqVpn && resultCode == Activity.RESULT_OK) startVpn()
+                  val providers = arrayOf("AdGuard", "Comss.one", "TurtleGuard", "OpenBLD", "Quad9")
+                  spinner.adapter = ArrayAdapter(requireContext(), android.R.layout.simple_spinner_dropdown_item, providers)
+                  spinner.setSelection(prefs.getInt("doh_provider", 0))
+                  DnsVpnService.setDoHProvider(prefs.getInt("doh_provider", 0))
+                  swDoh.isChecked = DnsVpnService.useDoH
+                  swAuto.isChecked = prefs.getBoolean("auto_start", false)
+
+                  swDoh.setOnCheckedChangeListener { _, on -> DnsVpnService.useDoH = on }
+                  swAuto.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("auto_start", on).apply() }
+                  spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                      override fun onItemSelected(parent: AdapterView<*>?, v: View?, pos: Int, id: Long) {
+                          DnsVpnService.setDoHProvider(pos); prefs.edit().putInt("doh_provider", pos).apply()
+                      }
+                      override fun onNothingSelected(parent: AdapterView<*>?) {}
+                  }
+
+                  fun refreshSources() {
+                      sourcesContainer.removeAllViews()
+                      HostsSources.DEFAULT_SOURCES.forEach { source ->
+                          val row = LinearLayout(requireContext())
+                          row.orientation = LinearLayout.HORIZONTAL
+                          row.gravity = Gravity.CENTER_VERTICAL
+                          row.setPadding(0, 16, 0, 16)
+                          val textContainer = LinearLayout(requireContext())
+                          textContainer.orientation = LinearLayout.VERTICAL
+                          textContainer.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                          val nameText = TextView(requireContext())
+                          nameText.text = source.name; nameText.setTextColor(Color.WHITE); nameText.textSize = 16f
+                          textContainer.addView(nameText)
+                          val descText = TextView(requireContext())
+                          descText.text = source.description; descText.setTextColor(Color.GRAY); descText.textSize = 12f
+                          textContainer.addView(descText)
+                          row.addView(textContainer)
+                          val sw = SwitchCompat(requireContext())
+                          sw.isChecked = HostsSources.isEnabled(requireContext(), source.name)
+                          sw.setOnCheckedChangeListener { _, isChecked -> HostsSources.setEnabled(requireContext(), source.name, isChecked) }
+                          row.addView(sw)
+                          sourcesContainer.addView(row)
+                          val divider = View(requireContext())
+                          divider.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
+                          divider.setBackgroundColor(Color.parseColor("#333333"))
+                          sourcesContainer.addView(divider)
+                      }
+                  }
+                  refreshSources()
+
+                  fun refreshCustomUrls() {
+                      customUrlsContainer.removeAllViews()
+                      val urls = HostsSources.getCustomUrls(requireContext())
+                      if (urls.isEmpty()) {
+                          val tv = TextView(requireContext())
+                          tv.text = "Нет своих источников"; tv.setTextColor(Color.GRAY)
+                          customUrlsContainer.addView(tv)
+                          return
+                      }
+                      urls.forEach { url ->
+                          val row = LinearLayout(requireContext())
+                          row.orientation = LinearLayout.HORIZONTAL
+                          row.gravity = Gravity.CENTER_VERTICAL
+                          row.setPadding(0, 8, 0, 8)
+                          val urlText = TextView(requireContext())
+                          urlText.text = url; urlText.setTextColor(Color.LTGRAY); urlText.textSize = 12f
+                          urlText.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                          row.addView(urlText)
+                          val delBtn = Button(requireContext())
+                          delBtn.text = "✕"; delBtn.setTextColor(Color.WHITE); delBtn.setBackgroundColor(Color.TRANSPARENT)
+                          delBtn.setOnClickListener { HostsSources.removeCustomUrl(requireContext(), url); refreshCustomUrls() }
+                          row.addView(delBtn)
+                          customUrlsContainer.addView(row)
+                      }
+                  }
+                  refreshCustomUrls()
+
+                  addCustomBtn.setOnClickListener {
+                      val url = customUrlInput.text.toString().trim()
+                      if (url.startsWith("http")) { HostsSources.addCustomUrl(requireContext(), url); customUrlInput.text.clear(); refreshCustomUrls() }
+                      else Toast.makeText(context, "Введите корректный URL", Toast.LENGTH_SHORT).show()
+                  }
+
+                  fun refreshCacheInfo() {
+                      val raw = requireContext().getSharedPreferences("smartblock_hosts", Context.MODE_PRIVATE).getString("cached_domains", null)
+                      val count = raw?.split('\n')?.count { it.isNotBlank() } ?: 0
+                      cacheInfo.text = "В базе доменов: $count"
+                  }
+                  refreshCacheInfo()
+
+                  clearCacheBtn.setOnClickListener {
+                      AlertDialog.Builder(requireContext()).setTitle("Очистить кэш?").setMessage("Все загруженные списки будут удалены.")
+                          .setPositiveButton("Очистить") { _, _ ->
+                              requireContext().getSharedPreferences("smartblock_hosts", Context.MODE_PRIVATE).edit().clear().apply()
+                              HostsUpdater.loadCached(requireContext()); refreshCacheInfo()
+                          }.setNegativeButton("Отмена", null).show()
+                  }
+
+                  view.findViewById<Button>(R.id.updateButton).setOnClickListener {
+                      Toast.makeText(context, "Обновление запущено...", Toast.LENGTH_SHORT).show()
+                      kotlin.concurrent.thread { HostsUpdater.update(requireContext()); activity?.runOnUiThread { refreshCacheInfo() } }
+                  }
+                  view.findViewById<Button>(R.id.batteryButton).setOnClickListener {
+                      val pm = requireContext().getSystemService(Context.POWER_SERVICE) as PowerManager
+                      if (!pm.isIgnoringBatteryOptimizations(requireContext().packageName)) {
+                          startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply { data = Uri.parse("package:${requireContext().packageName}") })
+                      } else Toast.makeText(context, "Уже разрешено", Toast.LENGTH_SHORT).show()
+                  }
+                  view.findViewById<Button>(R.id.checkUpdateButton).setOnClickListener {
+                      Toast.makeText(context, "Проверка...", Toast.LENGTH_SHORT).show()
+                      UpdateChecker.check(requireContext()) { res ->
+                          activity?.runOnUiThread {
+                              when (res) {
+                                  is UpdateChecker.UpdateResult.Available -> AlertDialog.Builder(requireContext()).setTitle("Обновление").setMessage("Версия: ${res.version}. Скачать?").setPositiveButton("Да") { _, _ -> UpdateChecker.download(requireContext(), res.url) }.setNegativeButton("Нет", null).show()
+                                  is UpdateChecker.UpdateResult.Latest -> Toast.makeText(context, "Последняя версия", Toast.LENGTH_SHORT).show()
+                                  is UpdateChecker.UpdateResult.Error -> Toast.makeText(context, "Ошибка: ${res.message}", Toast.LENGTH_SHORT).show()
+                              }
+                          }
+                      }
+                  }
               }
           }
           EOF
@@ -415,7 +736,6 @@ jobs:
           import java.util.concurrent.TimeUnit
 
           object UpdateChecker {
-              // ВАШИ ДАННЫЕ РЕПОЗИТОРИЯ
               private const val OWNER = "gvineon550-coder"
               private const val REPO = "smartblock"
               private const val API_URL = "https://api.github.com/repos/$OWNER/$REPO/releases/latest"
@@ -425,7 +745,6 @@ jobs:
                   data class Latest(val version: String) : UpdateResult()
                   data class Error(val message: String) : UpdateResult()
               }
-
               fun check(context: Context, callback: (UpdateResult) -> Unit) {
                   CoroutineScope(Dispatchers.IO).launch {
                       try {
@@ -460,9 +779,7 @@ jobs:
                   return false
               }
               fun download(context: Context, url: String) {
-                  val request = DownloadManager.Request(Uri.parse(url))
-                      .setTitle("SmartBlock Update").setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "SmartBlock-update.apk")
-                      .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                  val request = DownloadManager.Request(Uri.parse(url)).setTitle("SmartBlock Update").setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, "SmartBlock-update.apk").setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                   (context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager).enqueue(request)
               }
           }
@@ -477,22 +794,16 @@ jobs:
           object BlockLog {
               private val logs = LinkedList<String>()
               private val format = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-
               fun add(domain: String) {
                   synchronized(logs) {
                       logs.addFirst("${format.format(Date())} - $domain")
                       if (logs.size > 100) logs.removeLast()
                   }
               }
-
-              fun getLog(): String {
-                  synchronized(logs) { return if (logs.isEmpty()) "Лог пуст." else logs.joinToString("\n") }
-              }
-
+              fun getLog(): String { synchronized(logs) { return if (logs.isEmpty()) "Лог пуст." else logs.joinToString("\n") } }
               fun filter(query: String): String {
                   synchronized(logs) {
-                      val q = query.lowercase()
-                      return logs.filter { it.contains(q) }.joinToString("\n").ifEmpty { "Ничего не найдено" }
+                      return logs.filter { it.contains(query.lowercase()) }.joinToString("\n").ifEmpty { "Ничего не найдено" }
                   }
               }
           }
@@ -529,61 +840,38 @@ jobs:
                   val blockedCount = AtomicLong(0)
                   private const val CHANNEL = "smartblock"
                   private const val NOTIF = 1
-                  private val DOH_PROVIDERS = listOf(
-                      "https://dns.adguard-dns.com/dns-query", "https://dns.comss.one/dns-query",
-                      "https://dns.turtleguard.cloud/dns-query", "https://doh.openbld.net/dns-query",
-                      "https://dns.quad9.net/dns-query"
-                  )
+                  private val DOH_PROVIDERS = listOf("https://dns.adguard-dns.com/dns-query", "https://dns.comss.one/dns-query", "https://dns.turtleguard.cloud/dns-query", "https://doh.openbld.net/dns-query", "https://dns.quad9.net/dns-query")
                   private var currentProvider = 0
                   fun setDoHProvider(index: Int) { if (index in DOH_PROVIDERS.indices) currentProvider = index }
               }
-
               private var vpn: ParcelFileDescriptor? = null
               private var worker: Thread? = null
               private var wakeLock: PowerManager.WakeLock? = null
               private var wifiLock: WifiManager.WifiLock? = null
               private val upstream = InetAddress.getByName("1.1.1.1")
               private val httpClient = OkHttpClient.Builder().connectTimeout(5, TimeUnit.SECONDS).build()
-              
               private val dnsCache = object : android.util.LruCache<String, ByteArray>(1000) {}
 
               override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
                   if (vpn != null) return START_STICKY
-                  createChannel()
-                  startForeground(NOTIF, buildNotif())
-                  acquireLocks()
-                  
-                  vpn = Builder()
-                      .setSession("SmartBlock")
-                      .addAddress("10.0.0.2", 32)
-                      .addDnsServer("10.0.0.1")
-                      .addRoute("10.0.0.1", 32)
-                      .addAddress("fd00::2", 128)
-                      .addDnsServer("fd00::1")
-                      .addRoute("fd00::1", 128)
-                      .setBlocking(true)
-                      .establish() ?: return START_NOT_STICKY
-                      
-                  isRunning = true
-                  worker = Thread { run() }.also { it.start() }
+                  createChannel(); startForeground(NOTIF, buildNotif()); acquireLocks()
+                  vpn = Builder().setSession("SmartBlock").addAddress("10.0.0.2", 32).addDnsServer("10.0.0.1").addRoute("10.0.0.1", 32).addAddress("fd00::2", 128).addDnsServer("fd00::1").addRoute("fd00::1", 128).setBlocking(true).establish() ?: return START_NOT_STICKY
+                  isRunning = true; worker = Thread { run() }.also { it.start() }
                   return START_STICKY
               }
 
               private fun acquireLocks() {
                   val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
-                  wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SmartBlock::WakeLock")
-                  wakeLock?.acquire(10 * 60 * 1000L)
+                  wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SmartBlock::WakeLock"); wakeLock?.acquire(10 * 60 * 1000L)
                   val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
-                  wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SmartBlock::WifiLock")
-                  wifiLock?.acquire()
+                  wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SmartBlock::WifiLock"); wifiLock?.acquire()
               }
 
               private fun run() {
                   val pfd = vpn ?: return
                   FileInputStream(pfd.fileDescriptor).use { input ->
                       FileOutputStream(pfd.fileDescriptor).use { output ->
-                          val buf = ByteArray(32767)
-                          val sock = DatagramSocket().also { protect(it); it.soTimeout = 3000 }
+                          val buf = ByteArray(32767); val sock = DatagramSocket().also { protect(it); it.soTimeout = 3000 }
                           while (isRunning) {
                               val n = try { input.read(buf) } catch (e: Exception) { break }
                               if (n > 0) try { handle(buf.copyOf(n), output, sock) } catch (e: Exception) {}
@@ -594,13 +882,11 @@ jobs:
 
               private fun handle(pkt: ByteArray, out: FileOutputStream, sock: DatagramSocket) {
                   if (pkt.size < 28) return
-                  val isV4 = ((pkt[0].toInt() ushr 4) and 0xF) == 4
-                  if (isV4 && (pkt[9].toInt() and 0xFF) == 17) {
+                  if (((pkt[0].toInt() ushr 4) and 0xF) == 4 && (pkt[9].toInt() and 0xFF) == 17) {
                       val ihl = (pkt[0].toInt() and 0xF) * 4
                       val total = ((pkt[2].toInt() and 0xFF) shl 8) or (pkt[3].toInt() and 0xFF)
                       if (ihl + 8 > total || ihl + 8 > pkt.size) return
-                      val srcIp = pkt.copyOfRange(12, 16)
-                      val dstIp = pkt.copyOfRange(16, 20)
+                      val srcIp = pkt.copyOfRange(12, 16); val dstIp = pkt.copyOfRange(16, 20)
                       val srcPort = ((pkt[ihl].toInt() and 0xFF) shl 8) or (pkt[ihl + 1].toInt() and 0xFF)
                       val dstPort = ((pkt[ihl + 2].toInt() and 0xFF) shl 8) or (pkt[ihl + 3].toInt() and 0xFF)
                       if (dstPort != 53) return
@@ -613,30 +899,19 @@ jobs:
               private fun processDns(dns: ByteArray, out: FileOutputStream, sock: DatagramSocket, dstIp: ByteArray, srcIp: ByteArray, srcPort: Int) {
                   val domain = DnsPacket.parseDomain(dns) ?: return
                   if (FilterEngine.isBlocked(domain)) {
-                      blockedCount.incrementAndGet()
-                      BlockLog.add(domain)
-                      out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, DnsPacket.buildNxdomain(dns)))
-                      return
+                      blockedCount.incrementAndGet(); BlockLog.add(domain)
+                      out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, DnsPacket.buildNxdomain(dns))); return
                   }
-                  
                   val cached = dnsCache.get(domain)
-                  if (cached != null) {
-                      out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, cached))
-                      return
-                  }
-
-                  if (useDoH) sendDoH(dns, out, dstIp, srcIp, srcPort, domain)
-                  else sendUDP(dns, out, sock, dstIp, srcIp, srcPort, domain)
+                  if (cached != null) { out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, cached)); return }
+                  if (useDoH) sendDoH(dns, out, dstIp, srcIp, srcPort, domain) else sendUDP(dns, out, sock, dstIp, srcIp, srcPort, domain)
               }
 
               private fun sendUDP(dns: ByteArray, out: FileOutputStream, sock: DatagramSocket, dstIp: ByteArray, srcIp: ByteArray, srcPort: Int, key: String) {
                   try {
                       sock.send(DatagramPacket(dns, dns.size, upstream, 53))
-                      val rb = ByteArray(4096)
-                      val rp = DatagramPacket(rb, rb.size)
-                      sock.receive(rp)
-                      val resp = rb.copyOf(rp.length)
-                      dnsCache.put(key, resp)
+                      val rb = ByteArray(4096); val rp = DatagramPacket(rb, rb.size); sock.receive(rp)
+                      val resp = rb.copyOf(rp.length); dnsCache.put(key, resp)
                       out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, resp))
                   } catch (e: Exception) {}
               }
@@ -647,53 +922,34 @@ jobs:
                       val request = Request.Builder().url(DOH_PROVIDERS[currentProvider]).post(body).header("Accept", "application/dns-message").build()
                       httpClient.newCall(request).execute().use { resp ->
                           if (resp.isSuccessful && resp.body != null) {
-                              val bytes = resp.body!!.bytes()
-                              dnsCache.put(key, bytes)
+                              val bytes = resp.body!!.bytes(); dnsCache.put(key, bytes)
                               out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, bytes))
                           }
                       }
-                  } catch (e: Exception) {
-                      val s = DatagramSocket(); protect(s); sendUDP(dns, out, s, dstIp, srcIp, srcPort, key); s.close()
-                  }
+                  } catch (e: Exception) { val s = DatagramSocket(); protect(s); sendUDP(dns, out, s, dstIp, srcIp, srcPort, key); s.close() }
               }
 
               private fun buildIpUdp(src: ByteArray, dst: ByteArray, sp: Int, dp: Int, payload: ByteArray): ByteArray {
-                  val udpLen = 8 + payload.size
-                  val p = ByteArray(20 + udpLen)
-                  p[0] = 0x45; p[2] = ((p.size shr 8) and 0xFF).toByte(); p[3] = (p.size and 0xFF).toByte()
-                  p[6] = 0x40; p[8] = 64; p[9] = 17
+                  val udpLen = 8 + payload.size; val p = ByteArray(20 + udpLen)
+                  p[0] = 0x45; p[2] = ((p.size shr 8) and 0xFF).toByte(); p[3] = (p.size and 0xFF).toByte(); p[6] = 0x40; p[8] = 64; p[9] = 17
                   System.arraycopy(src, 0, p, 12, 4); System.arraycopy(dst, 0, p, 16, 4)
                   val sum = DnsPacket.checksum(p, 0, 20)
                   p[10] = ((sum shr 8) and 0xFF).toByte(); p[11] = (sum and 0xFF).toByte()
-                  p[20] = ((sp shr 8) and 0xFF).toByte(); p[21] = (sp and 0xFF).toByte()
-                  p[22] = ((dp shr 8) and 0xFF).toByte(); p[23] = (dp and 0xFF).toByte()
+                  p[20] = ((sp shr 8) and 0xFF).toByte(); p[21] = (sp and 0xFF).toByte(); p[22] = ((dp shr 8) and 0xFF).toByte(); p[23] = (dp and 0xFF).toByte()
                   p[24] = ((udpLen shr 8) and 0xFF).toByte(); p[25] = (udpLen and 0xFF).toByte()
-                  System.arraycopy(payload, 0, p, 28, payload.size)
-                  return p
+                  System.arraycopy(payload, 0, p, 28, payload.size); return p
               }
 
-              override fun onRevoke() {
-                  isRunning = false
-                  stopSelf()
-                  super.onRevoke()
-              }
-
+              override fun onRevoke() { isRunning = false; stopSelf(); super.onRevoke() }
               override fun onDestroy() {
                   isRunning = false; worker?.interrupt(); vpn?.close(); vpn = null
-                  wakeLock?.let { if (it.isHeld) it.release() }
-                  wifiLock?.let { if (it.isHeld) it.release() }
+                  wakeLock?.let { if (it.isHeld) it.release() }; wifiLock?.let { if (it.isHeld) it.release() }
                   super.onDestroy()
               }
-
-              private fun createChannel() {
-                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                      getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "SmartBlock", NotificationManager.IMPORTANCE_LOW))
-                  }
-              }
+              private fun createChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) getSystemService(NotificationManager::class.java).createNotificationChannel(NotificationChannel(CHANNEL, "SmartBlock", NotificationManager.IMPORTANCE_LOW)) }
               private fun buildNotif(): Notification {
                   val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
-                  return NotificationCompat.Builder(this, CHANNEL).setContentTitle("SmartBlock защищает").setContentText("Фильтрация DNS активна")
-                      .setSmallIcon(android.R.drawable.ic_lock_lock).setContentIntent(pi).setOngoing(true).build()
+                  return NotificationCompat.Builder(this, CHANNEL).setContentTitle("SmartBlock защищает").setContentText("Фильтрация DNS активна").setSmallIcon(android.R.drawable.ic_lock_lock).setContentIntent(pi).setOngoing(true).build()
               }
           }
           EOF
@@ -734,19 +990,25 @@ jobs:
               }
 
               fun addBlocked(domain: String, ctx: Context) {
-                  val d = domain.lowercase().trim()
-                  exact.add(d); suffixes.add(d)
+                  val d = domain.lowercase().trim(); exact.add(d); suffixes.add(d)
                   val p = ctx.getSharedPreferences("smartblock", Context.MODE_PRIVATE)
                   val cur = p.getStringSet("user_block", emptySet())?.toMutableSet() ?: mutableSetOf()
                   cur.add(d); p.edit().putStringSet("user_block", cur).apply()
               }
 
               fun addWhitelist(domain: String, ctx: Context) {
-                  val d = domain.lowercase().trim()
-                  whitelist.add(d)
+                  val d = domain.lowercase().trim(); whitelist.add(d)
                   val p = ctx.getSharedPreferences("smartblock", Context.MODE_PRIVATE)
                   val cur = p.getStringSet("user_white", emptySet())?.toMutableSet() ?: mutableSetOf()
                   cur.add(d); p.edit().putStringSet("user_white", cur).apply()
+              }
+
+              fun removeBlocked(domain: String) {
+                  val d = domain.lowercase().trim(); exact.remove(d); suffixes.remove(d)
+              }
+
+              fun removeWhitelist(domain: String) {
+                  val d = domain.lowercase().trim(); whitelist.remove(d)
               }
 
               fun addAll(domains: Collection<String>) { domains.forEach { if (it.isNotBlank()) { exact.add(it); suffixes.add(it) } } }
@@ -763,21 +1025,21 @@ jobs:
           object HostsUpdater {
               private const val PREFS = "smartblock_hosts"
               private const val KEY_CACHE = "cached_domains"
-              private val SOURCES = listOf(
-                  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
-                  "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/hosts.txt"
-              )
 
               fun update(ctx: Context): Int {
                   val all = mutableSetOf<String>()
-                  SOURCES.forEach { url ->
+                  val sources = HostsSources.getActiveUrls(ctx)
+                  sources.forEach { url ->
                       try {
                           val conn = URL(url).openConnection() as HttpURLConnection
                           conn.connectTimeout = 15000; conn.requestMethod = "GET"
+                          conn.setRequestProperty("User-Agent", "SmartBlock/4.3")
                           conn.inputStream.bufferedReader().useLines { lines ->
                               lines.forEach { l ->
                                   val parts = l.trim().substringBefore('#').trim().split(Regex("\\s+"))
-                                  if (parts.size >= 2 && !parts[1].startsWith("127.")) all.add(parts[1].lowercase().trimEnd('.'))
+                                  if (parts.size >= 2 && !parts[1].startsWith("127.") && !parts[1].startsWith("0.0.0.0")) {
+                                      all.add(parts[1].lowercase().trimEnd('.'))
+                                  }
                               }
                           }
                       } catch (_: Exception) { }
@@ -829,81 +1091,112 @@ jobs:
 
           cat > app/src/main/res/layout/activity_main.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
-          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-              xmlns:app="http://schemas.android.com/apk/res-auto"
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
               android:layout_width="match_parent" android:layout_height="match_parent"
-              android:background="#121212" android:fillViewport="true">
-              <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                  android:orientation="vertical" android:padding="16dp">
+              android:orientation="vertical" android:background="#121212">
+              <FrameLayout android:id="@+id/fragment_container" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1"/>
+              <com.google.android.material.bottomnavigation.BottomNavigationView
+                  android:id="@+id/bottom_nav" android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:background="#1E1E1E" app:itemIconTint="#BB86FC" app:itemTextColor="#BB86FC"
+                  xmlns:app="http://schemas.android.com/apk/res-auto" app:menu="@menu/bottom_nav_menu"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/layout/fragment_home.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#121212">
+              <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                  <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
+                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                          <TextView android:id="@+id/statusText" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Защита выключена" android:textSize="24sp" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="16dp"/>
+                          <androidx.appcompat.widget.SwitchCompat android:id="@+id/vpnSwitch" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Включить защиту" android:textColor="#BBBBBB" android:textSize="16sp"/>
+                      </LinearLayout>
+                  </com.google.android.material.card.MaterialCardView>
+                  <TextView android:id="@+id/statsText" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Заблокировано: 0" android:textColor="#FFB74D" android:textSize="16sp" android:paddingBottom="16dp"/>
+                  <Button android:id="@+id/updateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить списки" android:backgroundTint="#03DAC6" android:textColor="#000000"/>
+              </LinearLayout>
+          </ScrollView>
+          EOF
+
+          cat > app/src/main/res/layout/fragment_logs.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="#121212" android:padding="16dp">
+              <EditText android:id="@+id/searchInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Поиск по логу..." android:textColorHint="#666666" android:textColor="#FFFFFF" android:backgroundTint="#BB86FC" android:layout_marginBottom="8dp"/>
+              <ScrollView android:layout_width="match_parent" android:layout_height="match_parent">
+                  <TextView android:id="@+id/logText" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Лог пуст." android:textColor="#AAAAAA" android:textSize="12sp" android:fontFamily="monospace"/>
+              </ScrollView>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/layout/fragment_lists.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="#121212" android:padding="16dp">
+              
+              <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="8dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                      <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Добавить один домен" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
+                      <EditText android:id="@+id/domainInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="example.com" android:textColorHint="#666666" android:textColor="#FFFFFF" android:inputType="textUri" android:backgroundTint="#BB86FC"/>
+                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:paddingTop="8dp">
+                          <Button android:id="@+id/addBlockBtn" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="В Чёрный" android:backgroundTint="#EF5350" android:textColor="#FFFFFF"/>
+                          <Button android:id="@+id/addWhiteBtn" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="В Белый" android:backgroundTint="#66BB6A" android:textColor="#FFFFFF"/>
+                      </LinearLayout>
+                  </LinearLayout>
+              </com.google.android.material.card.MaterialCardView>
+
+              <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="8dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                      <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Импорт из файла или текста" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
+                      <EditText android:id="@+id/bulkInput" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="0.0.0.0 ads.com\nads.com" android:textColorHint="#666666" android:textColor="#FFFFFF" android:inputType="textMultiLine" android:minLines="3" android:gravity="top|start" android:backgroundTint="#BB86FC" android:textSize="12sp"/>
+                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:paddingTop="8dp">
+                          <Button android:id="@+id/importBtn" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Импорт текста" android:backgroundTint="#BB86FC" android:textColor="#000000"/>
+                          <Button android:id="@+id/fileBtn" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:text="Выбрать файл" android:backgroundTint="#FFB74D" android:textColor="#000000"/>
+                      </LinearLayout>
+                  </LinearLayout>
+              </com.google.android.material.card.MaterialCardView>
+
+              <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
+                  <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+                      <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Черный список:" android:textColor="#EF5350" android:textStyle="bold"/>
+                      <LinearLayout android:id="@+id/blockListContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginBottom="16dp"/>
+                      <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Белый список:" android:textColor="#66BB6A" android:textStyle="bold"/>
+                      <LinearLayout android:id="@+id/whiteListContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical"/>
+                  </LinearLayout>
+              </ScrollView>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/layout/fragment_settings.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#121212">
+              <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                   
-                  <com.google.android.material.card.MaterialCardView android:layout_width="match_parent"
-                      android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp">
-                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                          android:orientation="vertical" android:padding="16dp">
-                          <TextView android:id="@+id/statusText" android:layout_width="match_parent"
-                              android:layout_height="wrap_content" android:text="Защита выключена"
-                              android:textSize="24sp" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="16dp"/>
-                          <androidx.appcompat.widget.SwitchCompat android:id="@+id/vpnSwitch"
-                              android:layout_width="match_parent" android:layout_height="wrap_content"
-                              android:text="Включить защиту" android:textColor="#BBBBBB" android:textSize="16sp"/>
-                          <View android:layout_width="match_parent" android:layout_height="1dp" android:background="#333333" android:layout_marginTop="12dp" android:layout_marginBottom="12dp"/>
-                          <androidx.appcompat.widget.SwitchCompat android:id="@+id/dohSwitch"
-                              android:layout_width="match_parent" android:layout_height="wrap_content"
-                              android:text="DNS-over-HTTPS" android:textColor="#BBBBBB" android:textSize="14sp"/>
-                          <Spinner android:id="@+id/dohSpinner" android:layout_width="match_parent"
-                              android:layout_height="48dp" android:backgroundTint="#BB86FC"/>
-                          <androidx.appcompat.widget.SwitchCompat android:id="@+id/autoStartSwitch"
-                              android:layout_width="match_parent" android:layout_height="wrap_content"
-                              android:text="Автозапуск при загрузке" android:textColor="#BBBBBB" android:textSize="14sp"/>
+                  <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
+                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                          <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="DNS-сервер (DoH)" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
+                          <androidx.appcompat.widget.SwitchCompat android:id="@+id/dohSwitch" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="DNS-over-HTTPS" android:textColor="#FFFFFF"/>
+                          <Spinner android:id="@+id/dohSpinner" android:layout_width="match_parent" android:layout_height="48dp" android:backgroundTint="#BB86FC" android:layout_marginBottom="8dp"/>
+                          <androidx.appcompat.widget.SwitchCompat android:id="@+id/autoStartSwitch" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Автозапуск при загрузке" android:textColor="#FFFFFF"/>
                       </LinearLayout>
                   </com.google.android.material.card.MaterialCardView>
 
-                  <TextView android:id="@+id/statsText" android:layout_width="match_parent"
-                      android:layout_height="wrap_content" android:text="Заблокировано: 0"
-                      android:textColor="#FFB74D" android:textSize="16sp" android:paddingBottom="16dp"/>
-
-                  <com.google.android.material.card.MaterialCardView android:layout_width="match_parent"
-                      android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp">
-                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                          android:orientation="vertical" android:padding="16dp">
-                          <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                              android:text="Управление доменами" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
-                          <EditText android:id="@+id/domainInput" android:layout_width="match_parent"
-                              android:layout_height="wrap_content" android:hint="example.com" android:textColorHint="#666666"
-                              android:textColor="#FFFFFF" android:inputType="textUri" android:backgroundTint="#BB86FC"/>
-                          <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:paddingTop="8dp">
-                              <Button android:id="@+id/addButton" android:layout_width="0dp" android:layout_weight="1"
-                                  android:layout_height="wrap_content" android:text="В блок" android:backgroundTint="#EF5350" android:textColor="#FFFFFF"/>
-                              <Button android:id="@+id/addWhiteButton" android:layout_width="0dp" android:layout_weight="1"
-                                  android:layout_height="wrap_content" android:text="В белый" android:backgroundTint="#66BB6A" android:textColor="#FFFFFF"/>
+                  <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
+                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
+                          <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Источники хостов" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
+                          <TextView android:id="@+id/cacheInfo" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="В базе доменов: 0" android:textColor="#AAAAAA" android:textSize="12sp" android:paddingBottom="16dp"/>
+                          <LinearLayout android:id="@+id/sourcesContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginBottom="16dp"/>
+                          <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Свои URL (hosts-формат)" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
+                          <LinearLayout android:id="@+id/customUrlsContainer" android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:layout_marginBottom="8dp"/>
+                          <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal">
+                              <EditText android:id="@+id/customUrlInput" android:layout_width="0dp" android:layout_weight="1" android:layout_height="wrap_content" android:hint="https://..." android:textColorHint="#666666" android:textColor="#FFFFFF" android:inputType="textUri" android:backgroundTint="#BB86FC"/>
+                              <Button android:id="@+id/addCustomBtn" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Добавить" android:backgroundTint="#BB86FC" android:textColor="#000000" android:textSize="12sp"/>
                           </LinearLayout>
                       </LinearLayout>
                   </com.google.android.material.card.MaterialCardView>
 
-                  <Button android:id="@+id/updateButton" android:layout_width="match_parent"
-                      android:layout_height="wrap_content" android:text="Обновить списки"
-                      android:backgroundTint="#03DAC6" android:textColor="#000000" android:layout_marginBottom="8dp"/>
-                  <Button android:id="@+id/checkUpdateButton" android:layout_width="match_parent"
-                      android:layout_height="wrap_content" android:text="Обновить приложение"
-                      android:backgroundTint="#FFB74D" android:textColor="#000000" android:layout_marginBottom="8dp"/>
-                  <Button android:id="@+id/batteryButton" android:layout_width="match_parent"
-                      android:layout_height="wrap_content" android:text="Разрешить работу в фоне"
-                      android:backgroundTint="#81C784" android:textColor="#000000" android:layout_marginBottom="16dp"/>
-
-                  <com.google.android.material.card.MaterialCardView android:layout_width="match_parent"
-                      android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp">
-                      <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
-                          android:orientation="vertical" android:padding="16dp">
-                          <TextView android:layout_width="match_parent" android:layout_height="wrap_content"
-                              android:text="Лог блокировок" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
-                          <EditText android:id="@+id/searchInput" android:layout_width="match_parent"
-                              android:layout_height="wrap_content" android:hint="Поиск по логу..." android:textColorHint="#666666"
-                              android:textColor="#FFFFFF" android:backgroundTint="#BB86FC" android:layout_marginBottom="8dp"/>
-                          <TextView android:id="@+id/logText" android:layout_width="match_parent"
-                              android:layout_height="wrap_content" android:text="Лог пуст."
-                              android:textColor="#AAAAAA" android:textSize="12sp" android:fontFamily="monospace"/>
-                      </LinearLayout>
-                  </com.google.android.material.card.MaterialCardView>
+                  <Button android:id="@+id/updateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить все списки" android:backgroundTint="#03DAC6" android:textColor="#000000" android:layout_marginBottom="8dp"/>
+                  <Button android:id="@+id/clearCacheBtn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Очистить кэш списков" android:backgroundTint="#EF5350" android:textColor="#FFFFFF" android:layout_marginBottom="8dp"/>
+                  <Button android:id="@+id/batteryButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Разрешить работу в фоне" android:backgroundTint="#81C784" android:textColor="#000000" android:layout_marginBottom="8dp"/>
+                  <Button android:id="@+id/checkUpdateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить обновления приложения" android:backgroundTint="#FFB74D" android:textColor="#000000" android:layout_marginBottom="16dp"/>
 
               </LinearLayout>
           </ScrollView>
@@ -916,8 +1209,7 @@ jobs:
           <resources><style name="Theme.SmartBlock" parent="Theme.Material3.DayNight" /></resources>
           EOF
           cat > app/src/main/res/drawable/ic_launcher.xml << 'EOF'
-          <vector xmlns:android="http://schemas.android.com/apk/res/android"
-              android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
               <path android:fillColor="#BB86FC" android:pathData="M54,25 L30,38 L30,58 C30,72 40,82 54,87 C68,82 78,72 78,58 L78,38 Z"/>
               <path android:fillColor="#121212" android:pathData="M46,55 L52,61 L64,48 L66,50 L52,65 L44,57 Z"/>
           </vector>
@@ -925,9 +1217,9 @@ jobs:
 
       - name: Set version from run number
         run: |
-          VERSION_NAME="3.0.${{ github.run_number }}"
-          sed -i "s/versionCode = 5/versionCode = ${{ github.run_number }}/" app/build.gradle.kts
-          sed -i "s/versionName = \"3.0\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
+          VERSION_NAME="4.3.${{ github.run_number }}"
+          sed -i "s/versionCode = 9/versionCode = ${{ github.run_number }}/" app/build.gradle.kts
+          sed -i "s/versionName = \"4.3\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
       - uses: android-actions/setup-android@v4
         with: { packages: 'platforms;android-34' }
@@ -938,23 +1230,18 @@ jobs:
         run: gradle assembleRelease --no-daemon
 
       - name: Prepare APK
-        run: cp app/build/outputs/apk/release/app-release.apk "SmartBlock-v3.0.${{ github.run_number }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "SmartBlock-v4.3.${{ github.run_number }}.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v3.0.${{ github.run_number }}
-          name: SmartBlock v3.0.${{ github.run_number }}
+          tag_name: v4.3.${{ github.run_number }}
+          name: SmartBlock v4.3.${{ github.run_number }}
           body: |
-            Автоматический релиз SmartBlock v3.0 (Full Power).
-            
-            **Новое:**
-            - 🚀 Умный DNS-кэш (экономия батареи)
-            - 🛡️ Поддержка IPv6
-            - 🔄 Автообновление списков и Watchdog (WorkManager)
-            - 🔋 WifiLock + WakeLock
-            - 🚀 Автозапуск после перезагрузки (BootReceiver)
-            - 🎨 Поиск по логу и белый список
+            🚀 **SmartBlock v4.3 (Импорт из файла)**
+
+            **Что нового:**
+            - 📁 **Выбор файла**: На вкладке "Списки" появилась кнопка "Выбрать файл". Вы можете загрузить любой `.txt` или `.hosts` файл из памяти телефона, и приложение автоматически добавит все домены из него в черный список.
           files: SmartBlock-v*.apk
           draft: false
           prerelease: false
