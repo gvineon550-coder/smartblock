@@ -1,0 +1,642 @@
+name: Build and Release SmartDNS
+on:
+  push: { branches: [main] }
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with: { java-version: '17', distribution: 'temurin' }
+
+      - name: Restore keystore from cache
+        id: keystore-cache
+        uses: actions/cache@v4
+        with:
+          path: keystore.jks
+          key: smartdns-keystore-v1
+
+      - name: Generate keystore if missing
+        if: steps.keystore-cache.outputs.cache-hit != 'true'
+        run: |
+          keytool -genkeypair -v \
+            -keystore keystore.jks \
+            -alias smartdns \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass smartdnspass -keypass smartdnspass \
+            -dname "CN=SmartDNS, OU=Dev, O=Personal, L=City, S=State, C=RU"
+
+      - name: Generate project files
+        run: |
+          mkdir -p app/src/main/java/com/yourname/smartdns
+          mkdir -p app/src/main/res/layout
+          mkdir -p app/src/main/res/values
+          mkdir -p app/src/main/res/drawable
+
+          cat > settings.gradle.kts << 'EOF'
+          pluginManagement {
+              repositories { google(); mavenCentral(); gradlePluginPortal() }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories { google(); mavenCentral() }
+          }
+          rootProject.name = "SmartDNS"
+          include(":app")
+          EOF
+
+          cat > build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          EOF
+
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          kotlin.code.style=official
+          EOF
+
+          cat > app/build.gradle.kts << 'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.yourname.smartdns"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.yourname.smartdns"
+                  minSdk = 24
+                  targetSdk = 34
+                  versionCode = 2
+                  versionName = "1.1"
+              }
+              signingConfigs {
+                  create("release") {
+                      storeFile = rootProject.file("keystore.jks")
+                      storePassword = "smartdnspass"
+                      keyAlias = "smartdns"
+                      keyPassword = "smartdnspass"
+                  }
+              }
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                      signingConfig = signingConfigs.getByName("release")
+                  }
+              }
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          dependencies {
+              implementation("androidx.core:core-ktx:1.13.1")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("com.google.android.material:material:1.12.0")
+          }
+          EOF
+
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application
+                  android:allowBackup="true"
+                  android:icon="@drawable/ic_launcher"
+                  android:label="@string/app_name"
+                  android:supportsRtl="true"
+                  android:theme="@style/Theme.SmartDNS">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service
+                      android:name=".DnsVpnService"
+                      android:permission="android.permission.BIND_VPN_SERVICE"
+                      android:foregroundServiceType="specialUse"
+                      android:exported="false">
+                      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                          android:value="VPN DNS filter" />
+                      <intent-filter>
+                          <action android:name="android.net.VpnService" />
+                      </intent-filter>
+                  </service>
+              </application>
+          </manifest>
+          EOF
+
+          cat > app/src/main/java/com/yourname/smartdns/MainActivity.kt << 'EOF'
+          package com.yourname.smartdns
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.Bundle
+          import android.os.Handler
+          import android.os.Looper
+          import android.widget.Button
+          import android.widget.EditText
+          import android.widget.TextView
+          import android.widget.Toast
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.appcompat.widget.SwitchCompat
+          import kotlin.concurrent.thread
+
+          class MainActivity : AppCompatActivity() {
+              private val reqVpn = 100
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  setContentView(R.layout.activity_main)
+                  FilterEngine.loadDefaults(this)
+
+                  val sw = findViewById<SwitchCompat>(R.id.vpnSwitch)
+                  val status = findViewById<TextView>(R.id.statusText)
+                  val stats = findViewById<TextView>(R.id.statsText)
+                  val input = findViewById<EditText>(R.id.domainInput)
+                  val addBtn = findViewById<Button>(R.id.addButton)
+                  val updateBtn = findViewById<Button>(R.id.updateButton)
+
+                  sw.isChecked = DnsVpnService.isRunning
+                  status.text = if (DnsVpnService.isRunning) "Защита включена" else "Защита выключена"
+
+                  sw.setOnCheckedChangeListener { _, on ->
+                      if (on) {
+                          val intent = VpnService.prepare(this)
+                          if (intent != null) startActivityForResult(intent, reqVpn) else startVpn()
+                      } else {
+                          stopService(Intent(this, DnsVpnService::class.java))
+                          DnsVpnService.isRunning = false
+                          status.text = "Защита выключена"
+                      }
+                  }
+
+                  addBtn.setOnClickListener {
+                      val d = input.text.toString().trim().lowercase()
+                      if (d.isNotEmpty()) {
+                          FilterEngine.addBlocked(d, this)
+                          input.text.clear()
+                          Toast.makeText(this, "Заблокирован: " + d, Toast.LENGTH_SHORT).show()
+                      }
+                  }
+
+                  updateBtn.setOnClickListener {
+                      Toast.makeText(this, "Обновление списков...", Toast.LENGTH_SHORT).show()
+                      thread {
+                          val count = HostsUpdater.update(this)
+                          runOnUiThread {
+                              Toast.makeText(this, "Загружено доменов: " + count, Toast.LENGTH_LONG).show()
+                          }
+                      }
+                  }
+
+                  val handler = Handler(Looper.getMainLooper())
+                  handler.post(object : Runnable {
+                      override fun run() {
+                          stats.text = "Заблокировано запросов: " + DnsVpnService.blockedCount
+                          handler.postDelayed(this, 1000)
+                      }
+                  })
+              }
+
+              private fun startVpn() {
+                  startForegroundService(Intent(this, DnsVpnService::class.java))
+                  DnsVpnService.isRunning = true
+                  findViewById<TextView>(R.id.statusText).text = "Защита включена"
+              }
+
+              override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+                  super.onActivityResult(requestCode, resultCode, data)
+                  if (requestCode == reqVpn && resultCode == Activity.RESULT_OK) startVpn()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/yourname/smartdns/DnsVpnService.kt << 'EOF'
+          package com.yourname.smartdns
+
+          import android.app.Notification
+          import android.app.NotificationChannel
+          import android.app.NotificationManager
+          import android.app.PendingIntent
+          import android.content.Intent
+          import android.net.VpnService
+          import android.os.Build
+          import android.os.ParcelFileDescriptor
+          import androidx.core.app.NotificationCompat
+          import java.io.FileInputStream
+          import java.io.FileOutputStream
+          import java.net.DatagramPacket
+          import java.net.DatagramSocket
+          import java.net.InetAddress
+          import java.util.concurrent.atomic.AtomicLong
+
+          class DnsVpnService : VpnService() {
+              companion object {
+                  @Volatile var isRunning = false
+                  val blockedCount = AtomicLong(0)
+                  private const val CHANNEL = "smartdns"
+                  private const val NOTIF = 1
+              }
+              private var vpn: ParcelFileDescriptor? = null
+              private var worker: Thread? = null
+              private val upstream = InetAddress.getByName("1.1.1.1")
+              override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+                  if (vpn != null) return START_STICKY
+                  createChannel()
+                  startForeground(NOTIF, buildNotif())
+                  vpn = Builder()
+                      .setSession("SmartDNS")
+                      .addAddress("10.0.0.2", 32)
+                      .addDnsServer("10.0.0.1")
+                      .addRoute("10.0.0.1", 32)
+                      .setBlocking(true)
+                      .establish() ?: return START_NOT_STICKY
+                  isRunning = true
+                  worker = Thread { run() }.also { it.start() }
+                  return START_STICKY
+              }
+              private fun run() {
+                  val pfd = vpn ?: return
+                  FileInputStream(pfd.fileDescriptor).use { input ->
+                      FileOutputStream(pfd.fileDescriptor).use { output ->
+                          val buf = ByteArray(32767)
+                          val sock = DatagramSocket().also { protect(it); it.soTimeout = 3000 }
+                          while (isRunning) {
+                              val n = try { input.read(buf) } catch (e: Exception) { break }
+                              if (n > 0) try { handle(buf.copyOf(n), output, sock) } catch (e: Exception) {}
+                          }
+                      }
+                  }
+              }
+              private fun handle(pkt: ByteArray, out: FileOutputStream, sock: DatagramSocket) {
+                  if (pkt.size < 28) return
+                  if (((pkt[0].toInt() ushr 4) and 0xF) != 4) return
+                  if ((pkt[9].toInt() and 0xFF) != 17) return
+                  val ihl = (pkt[0].toInt() and 0xF) * 4
+                  val total = ((pkt[2].toInt() and 0xFF) shl 8) or (pkt[3].toInt() and 0xFF)
+                  if (ihl + 8 > total || ihl + 8 > pkt.size) return
+                  val srcIp = pkt.copyOfRange(12, 16)
+                  val dstIp = pkt.copyOfRange(16, 20)
+                  val srcPort = ((pkt[ihl].toInt() and 0xFF) shl 8) or (pkt[ihl + 1].toInt() and 0xFF)
+                  val dstPort = ((pkt[ihl + 2].toInt() and 0xFF) shl 8) or (pkt[ihl + 3].toInt() and 0xFF)
+                  if (dstPort != 53) return
+                  val udpLen = ((pkt[ihl + 4].toInt() and 0xFF) shl 8) or (pkt[ihl + 5].toInt() and 0xFF)
+                  if (ihl + udpLen > pkt.size) return
+                  val dns = pkt.copyOfRange(ihl + 8, ihl + udpLen)
+                  val domain = DnsPacket.parseDomain(dns)
+                  if (domain != null && FilterEngine.isBlocked(domain)) {
+                      blockedCount.incrementAndGet()
+                      out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, DnsPacket.buildNxdomain(dns)))
+                  } else {
+                      try {
+                          sock.send(DatagramPacket(dns, dns.size, upstream, 53))
+                          val rb = ByteArray(4096)
+                          val rp = DatagramPacket(rb, rb.size)
+                          sock.receive(rp)
+                          out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, rb.copyOf(rp.length)))
+                      } catch (e: Exception) {}
+                  }
+              }
+              private fun buildIpUdp(src: ByteArray, dst: ByteArray, sp: Int, dp: Int, payload: ByteArray): ByteArray {
+                  val udpLen = 8 + payload.size
+                  val total = 20 + udpLen
+                  val p = ByteArray(total)
+                  p[0] = 0x45
+                  p[2] = ((total shr 8) and 0xFF).toByte(); p[3] = (total and 0xFF).toByte()
+                  p[6] = 0x40
+                  p[8] = 64
+                  p[9] = 17
+                  System.arraycopy(src, 0, p, 12, 4)
+                  System.arraycopy(dst, 0, p, 16, 4)
+                  val sum = DnsPacket.checksum(p, 0, 20)
+                  p[10] = ((sum shr 8) and 0xFF).toByte(); p[11] = (sum and 0xFF).toByte()
+                  p[20] = ((sp shr 8) and 0xFF).toByte(); p[21] = (sp and 0xFF).toByte()
+                  p[22] = ((dp shr 8) and 0xFF).toByte(); p[23] = (dp and 0xFF).toByte()
+                  p[24] = ((udpLen shr 8) and 0xFF).toByte(); p[25] = (udpLen and 0xFF).toByte()
+                  System.arraycopy(payload, 0, p, 28, payload.size)
+                  return p
+              }
+              override fun onDestroy() {
+                  isRunning = false
+                  worker?.interrupt()
+                  vpn?.close(); vpn = null
+                  super.onDestroy()
+              }
+              private fun createChannel() {
+                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                      getSystemService(NotificationManager::class.java)
+                          .createNotificationChannel(NotificationChannel(CHANNEL, "SmartDNS", NotificationManager.IMPORTANCE_LOW))
+                  }
+              }
+              private fun buildNotif(): Notification {
+                  val pi = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
+                  return NotificationCompat.Builder(this, CHANNEL)
+                      .setContentTitle("SmartDNS защищает")
+                      .setContentText("Фильтрация DNS активна")
+                      .setSmallIcon(android.R.drawable.ic_lock_lock)
+                      .setContentIntent(pi)
+                      .setOngoing(true)
+                      .build()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/yourname/smartdns/FilterEngine.kt << 'EOF'
+          package com.yourname.smartdns
+
+          import android.content.Context
+          import java.util.concurrent.ConcurrentHashMap
+
+          object FilterEngine {
+              private val exact = ConcurrentHashMap.newKeySet<String>()
+              private val suffixes = ConcurrentHashMap.newKeySet<String>()
+
+              fun loadDefaults(ctx: Context) {
+                  if (exact.isNotEmpty()) return
+                  val list = listOf(
+                      "doubleclick.net", "googlesyndication.com", "googleadservices.com",
+                      "google-analytics.com", "googletagmanager.com", "adservice.google.com",
+                      "ads.yahoo.com", "adnxs.com", "taboola.com", "outbrain.com",
+                      "criteo.com", "quantserve.com", "scorecardresearch.com",
+                      "amazon-adsystem.com", "adcolony.com", "applovin.com",
+                      "unityads.unity3d.com", "vungle.com", "inmobi.com",
+                      "mopub.com", "chartboost.com", "ironsrc.com", "adjust.com",
+                      "appsflyer.com", "branch.io", "kochava.com", "singular.net"
+                  )
+                  list.forEach { exact.add(it); suffixes.add(it) }
+                  loadUserRules(ctx)
+                  HostsUpdater.loadCached(ctx)
+              }
+
+              fun isBlocked(domain: String): Boolean {
+                  val d = domain.lowercase().trimEnd('.')
+                  if (exact.contains(d)) return true
+                  var i = d.indexOf('.')
+                  while (i > 0) {
+                      if (suffixes.contains(d.substring(i + 1))) return true
+                      i = d.indexOf('.', i + 1)
+                  }
+                  return false
+              }
+
+              fun addBlocked(domain: String, ctx: Context) {
+                  val d = domain.lowercase().trim()
+                  if (d.isEmpty()) return
+                  exact.add(d); suffixes.add(d)
+                  saveUserRule(d, ctx)
+              }
+
+              fun addAll(domains: Collection<String>) {
+                  domains.forEach { d ->
+                      if (d.isNotBlank()) {
+                          exact.add(d); suffixes.add(d)
+                      }
+                  }
+              }
+
+              private fun loadUserRules(ctx: Context) {
+                  ctx.getSharedPreferences("smartdns", Context.MODE_PRIVATE)
+                      .getStringSet("user", emptySet())?.forEach { exact.add(it); suffixes.add(it) }
+              }
+
+              private fun saveUserRule(d: String, ctx: Context) {
+                  val prefs = ctx.getSharedPreferences("smartdns", Context.MODE_PRIVATE)
+                  val cur = prefs.getStringSet("user", emptySet())?.toMutableSet() ?: mutableSetOf()
+                  cur.add(d)
+                  prefs.edit().putStringSet("user", cur).apply()
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/yourname/smartdns/HostsUpdater.kt << 'EOF'
+          package com.yourname.smartdns
+
+          import android.content.Context
+          import java.net.HttpURLConnection
+          import java.net.URL
+
+          object HostsUpdater {
+              private const val PREFS = "smartdns_hosts"
+              private const val KEY_CACHE = "cached_domains"
+
+              private val SOURCES = listOf(
+                  "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts",
+                  "https://raw.githubusercontent.com/r-a-y/mobile-hosts/master/AdguardDNS.txt",
+                  "https://raw.githubusercontent.com/AdAway/adaway.github.io/master/hosts.txt"
+              )
+
+              fun update(ctx: Context): Int {
+                  val all = mutableSetOf<String>()
+                  SOURCES.forEach { url ->
+                      try {
+                          all.addAll(download(url))
+                      } catch (_: Exception) { }
+                  }
+                  if (all.isNotEmpty()) {
+                      FilterEngine.addAll(all)
+                      saveCache(ctx, all)
+                  }
+                  return all.size
+              }
+
+              fun loadCached(ctx: Context) {
+                  val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                      .getString(KEY_CACHE, null) ?: return
+                  val domains = raw.split('\n').filter { it.isNotBlank() }
+                  if (domains.isNotEmpty()) FilterEngine.addAll(domains)
+              }
+
+              private fun saveCache(ctx: Context, domains: Set<String>) {
+                  ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                      .edit().putString(KEY_CACHE, domains.joinToString("\n")).apply()
+              }
+
+              private fun download(urlStr: String): Set<String> {
+                  val result = mutableSetOf<String>()
+                  val conn = URL(urlStr).openConnection() as HttpURLConnection
+                  conn.connectTimeout = 15000
+                  conn.readTimeout = 15000
+                  conn.requestMethod = "GET"
+                  conn.setRequestProperty("User-Agent", "SmartDNS/1.1")
+                  try {
+                      conn.inputStream.bufferedReader().useLines { lines ->
+                          lines.forEach { line ->
+                              var l = line.trim()
+                              val hashIdx = l.indexOf('#')
+                              if (hashIdx >= 0) l = l.substring(0, hashIdx).trim()
+                              if (l.isEmpty()) return@forEach
+                              val parts = l.split(Regex("\\s+"))
+                              if (parts.size >= 2) {
+                                  val domain = parts[1].lowercase().trimEnd('.')
+                                  if (domain.isNotEmpty() &&
+                                      domain != "localhost" &&
+                                      domain != "localhost.localdomain" &&
+                                      domain != "broadcasthost" &&
+                                      domain != "0.0.0.0" &&
+                                      !domain.startsWith("127.")
+                                  ) {
+                                      result.add(domain)
+                                  }
+                              }
+                          }
+                      }
+                  } finally {
+                      conn.disconnect()
+                  }
+                  return result
+              }
+          }
+          EOF
+
+          cat > app/src/main/java/com/yourname/smartdns/DnsPacket.kt << 'EOF'
+          package com.yourname.smartdns
+
+          object DnsPacket {
+              fun parseDomain(packet: ByteArray): String? {
+                  if (packet.size < 12) return null
+                  var pos = 12
+                  val labels = mutableListOf<String>()
+                  while (pos < packet.size) {
+                      val len = packet[pos].toInt() and 0xFF
+                      if (len == 0) break
+                      if (len > 63 || pos + 1 + len > packet.size) return null
+                      labels.add(String(packet, pos + 1, len, Charsets.US_ASCII))
+                      pos += 1 + len
+                      if (labels.size > 20) return null
+                  }
+                  return if (labels.isEmpty()) null else labels.joinToString(".").lowercase()
+              }
+              fun buildNxdomain(query: ByteArray): ByteArray {
+                  val r = query.copyOf()
+                  if (r.size < 12) return r
+                  r[2] = (r[2].toInt() or 0x80).toByte()
+                  r[3] = ((r[3].toInt() and 0xF0) or 0x03).toByte()
+                  for (i in 6..11) r[i] = 0
+                  return r
+              }
+              fun checksum(d: ByteArray, off: Int, len: Int): Int {
+                  var sum = 0
+                  var i = off
+                  while (i < off + len - 1) {
+                      sum += ((d[i].toInt() and 0xFF) shl 8) or (d[i + 1].toInt() and 0xFF)
+                      i += 2
+                  }
+                  if (i < off + len) sum += (d[i].toInt() and 0xFF) shl 8
+                  while ((sum shr 16) != 0) sum = (sum and 0xFFFF) + (sum shr 16)
+                  return sum.inv() and 0xFFFF
+              }
+          }
+          EOF
+
+          cat > app/src/main/res/layout/activity_main.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+              android:layout_width="match_parent"
+              android:layout_height="match_parent"
+              android:orientation="vertical"
+              android:padding="16dp">
+              <TextView android:id="@+id/statusText"
+                  android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:text="Защита выключена" android:textSize="22sp"
+                  android:textStyle="bold" android:paddingBottom="16dp"/>
+              <androidx.appcompat.widget.SwitchCompat android:id="@+id/vpnSwitch"
+                  android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:text="Включить защиту DNS" android:textSize="16sp"
+                  android:paddingBottom="24dp"/>
+              <TextView android:id="@+id/statsText"
+                  android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:text="Заблокировано: 0" android:textSize="14sp"
+                  android:paddingBottom="16dp"/>
+              <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:orientation="horizontal" android:paddingBottom="8dp">
+                  <EditText android:id="@+id/domainInput"
+                      android:layout_width="0dp" android:layout_height="wrap_content"
+                      android:layout_weight="1" android:hint="example.com"
+                      android:inputType="textUri"/>
+                  <Button android:id="@+id/addButton"
+                      android:layout_width="wrap_content" android:layout_height="wrap_content"
+                      android:text="Блок"/>
+              </LinearLayout>
+              <Button android:id="@+id/updateButton"
+                  android:layout_width="match_parent" android:layout_height="wrap_content"
+                  android:text="Обновить списки из интернета"/>
+          </LinearLayout>
+          EOF
+
+          cat > app/src/main/res/values/strings.xml << 'EOF'
+          <resources><string name="app_name">SmartDNS</string></resources>
+          EOF
+
+          cat > app/src/main/res/values/themes.xml << 'EOF'
+          <resources>
+              <style name="Theme.SmartDNS" parent="Theme.Material3.DayNight" />
+          </resources>
+          EOF
+
+          cat > app/src/main/res/drawable/ic_launcher.xml << 'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="108" android:viewportHeight="108">
+              <path android:fillColor="#1565C0"
+                  android:pathData="M54,25 L30,38 L30,58 C30,72 40,82 54,87 C68,82 78,72 78,58 L78,38 Z"/>
+              <path android:fillColor="#FFFFFF"
+                  android:pathData="M46,55 L52,61 L64,48 L66,50 L52,65 L44,57 Z"/>
+          </vector>
+          EOF
+
+      - name: Set version from run number
+        run: |
+          VERSION_CODE=${{ github.run_number }}
+          VERSION_NAME="1.0.${VERSION_CODE}"
+          sed -i "s/versionCode = 2/versionCode = ${VERSION_CODE}/" app/build.gradle.kts
+          sed -i "s/versionName = \"1.1\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
+          echo "Building SmartDNS v${VERSION_NAME} (${VERSION_CODE})"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v3
+        with: { gradle-version: '8.7' }
+
+      - name: Build Release APK
+        run: gradle assembleRelease --no-daemon
+
+      - name: Prepare APK
+        run: |
+          VERSION="1.0.${{ github.run_number }}"
+          cp app/build/outputs/apk/release/app-release.apk "SmartDNS-v${VERSION}.apk"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: SmartDNS v1.0.${{ github.run_number }}
+          body: |
+            Автоматический релиз SmartDNS.
+
+            **Версия:** 1.0.${{ github.run_number }}
+            **Commit:** ${{ github.sha }}
+            **Сборка:** [${{ github.run_number }}](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            **Что делает:**
+            - Блокирует рекламу и трекеры на уровне DNS через VpnService
+            - Поддерживает пользовательские правила
+            - Загружает актуальные hosts-списки (StevenBlack, AdGuard, AdAway) по кнопке
+
+            **Установка:** скачайте APK ниже и откройте на телефоне (разрешите установку из неизвестных источников).
+          files: SmartDNS-v*.apk
+          draft: false
+          prerelease: false
