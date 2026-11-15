@@ -76,8 +76,8 @@ jobs:
                   applicationId = "com.gvineon550.smartblock"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 9
-                  versionName = "4.3"
+                  versionCode = 10
+                  versionName = "4.4"
               }
               signingConfigs {
                   create("release") {
@@ -285,6 +285,132 @@ jobs:
           }
           EOF
 
+          cat > app/src/main/java/com/gvineon550/smartblock/SelfTest.kt << 'EOF'
+          package com.gvineon550.smartblock
+
+          import android.content.Context
+          import java.net.HttpURLConnection
+          import java.net.InetAddress
+          import java.net.URL
+          import java.net.UnknownHostException
+
+          object SelfTest {
+              data class Result(val name: String, val status: Status, val details: String)
+              enum class Status { PASSED, FAILED, SKIPPED }
+
+              fun runAll(ctx: Context): List<Result> {
+                  val results = mutableListOf<Result>()
+
+                  // 1. VPN
+                  val vpnRunning = DnsVpnService.isRunning
+                  results.add(Result(
+                      "VPN-сервис",
+                      if (vpnRunning) Status.PASSED else Status.FAILED,
+                      if (vpnRunning) "Активен" else "Не запущен — включите защиту на главной"
+                  ))
+
+                  // 2. Списки
+                  val domainCount = FilterEngine.getDomainCount()
+                  val listStatus = when {
+                      domainCount > 1000 -> Status.PASSED
+                      domainCount > 0 -> Status.SKIPPED
+                      else -> Status.FAILED
+                  }
+                  val listHint = when {
+                      domainCount > 1000 -> "Загружено доменов: $domainCount"
+                      domainCount > 0 -> "Мало доменов ($domainCount) — нажмите «Обновить списки»"
+                      else -> "Списки пусты — обновите из интернета"
+                  }
+                  results.add(Result("Списки блокировки", listStatus, listHint))
+
+                  // 3. Перехват DNS (end-to-end)
+                  if (!vpnRunning) {
+                      results.add(Result("Перехват DNS", Status.SKIPPED, "Нужен активный VPN"))
+                  } else {
+                      val testDomain = "self-test-${System.currentTimeMillis()}.doubleclick.net"
+                      val t0 = System.currentTimeMillis()
+                      try {
+                          InetAddress.getByName(testDomain)
+                          results.add(Result(
+                              "Перехват DNS",
+                              Status.FAILED,
+                              "$testDomain разрешился — фильтр не работает"
+                          ))
+                      } catch (e: UnknownHostException) {
+                          val ms = System.currentTimeMillis() - t0
+                          results.add(Result(
+                              "Перехват DNS",
+                              Status.PASSED,
+                              "Тестовый домен заблокирован (${ms}мс)"
+                          ))
+                      } catch (e: Exception) {
+                          results.add(Result(
+                              "Перехват DNS",
+                              Status.FAILED,
+                              "Ошибка: ${e.message}"
+                          ))
+                      }
+                  }
+
+                  // 4. Белый список
+                  val whitelisted = FilterEngine.getWhitelistSample()
+                  if (whitelisted == null) {
+                      results.add(Result("Белый список", Status.SKIPPED, "Нет доменов в белом списке"))
+                  } else {
+                      try {
+                          InetAddress.getByName(whitelisted)
+                          results.add(Result("Белый список", Status.PASSED, "$whitelisted разрешается"))
+                      } catch (e: Exception) {
+                          results.add(Result("Белый список", Status.FAILED, "$whitelisted не разрешается"))
+                      }
+                  }
+
+                  // 5. DoH
+                  if (!DnsVpnService.useDoH) {
+                      results.add(Result("DoH-сервер", Status.SKIPPED, "DoH выключен, используется UDP"))
+                  } else {
+                      try {
+                          val dohUrl = DnsVpnService.getCurrentDoHProviderUrl()
+                          val host = URL(dohUrl).host
+                          val t0 = System.currentTimeMillis()
+                          val conn = URL("https://$host").openConnection() as HttpURLConnection
+                          conn.connectTimeout = 3000
+                          conn.readTimeout = 3000
+                          conn.requestMethod = "HEAD"
+                          try { conn.responseCode } catch (_: Exception) {}
+                          conn.disconnect()
+                          val ms = System.currentTimeMillis() - t0
+                          if (ms < 3000) {
+                              results.add(Result("DoH-сервер", Status.PASSED, "$host доступен (${ms}мс)"))
+                          } else {
+                              results.add(Result("DoH-сервер", Status.FAILED, "$host медленный или недоступен (${ms}мс)"))
+                          }
+                      } catch (e: Exception) {
+                          results.add(Result("DoH-сервер", Status.FAILED, "Недоступен: ${e.message}"))
+                      }
+                  }
+
+                  return results
+              }
+
+              fun formatResults(results: List<Result>): String {
+                  val sb = StringBuilder()
+                  var passed = 0; var failed = 0; var skipped = 0
+                  results.forEach { r ->
+                      val icon = when (r.status) {
+                          Status.PASSED -> "✅"; passed++
+                          Status.FAILED -> "❌"; failed++
+                          Status.SKIPPED -> "⏭️"; skipped++
+                      }
+                      sb.append("$icon ${r.name}\n     ${r.details}\n\n")
+                  }
+                  sb.append("───────────────\n")
+                  sb.append("Итого: $passed пройдено, $failed провалено, $skipped пропущено")
+                  return sb.toString()
+              }
+          }
+          EOF
+
           cat > app/src/main/java/com/gvineon550/smartblock/HostsSources.kt << 'EOF'
           package com.gvineon550.smartblock
 
@@ -309,34 +435,24 @@ jobs:
                   return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                       .getStringSet(KEY_ENABLED, DEFAULT_SOURCES.map { it.name }.toSet()) ?: DEFAULT_SOURCES.map { it.name }.toSet()
               }
-
               fun isEnabled(ctx: Context, name: String): Boolean = getEnabledNames(ctx).contains(name)
-
               fun setEnabled(ctx: Context, name: String, enabled: Boolean) {
                   val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                   val current = prefs.getStringSet(KEY_ENABLED, DEFAULT_SOURCES.map { it.name }.toSet())?.toMutableSet() ?: mutableSetOf()
                   if (enabled) current.add(name) else current.remove(name)
                   prefs.edit().putStringSet(KEY_ENABLED, current).apply()
               }
-
-              fun getCustomUrls(ctx: Context): Set<String> {
-                  return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(KEY_CUSTOM, emptySet()) ?: emptySet()
-              }
-
+              fun getCustomUrls(ctx: Context): Set<String> = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getStringSet(KEY_CUSTOM, emptySet()) ?: emptySet()
               fun addCustomUrl(ctx: Context, url: String) {
                   val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                   val current = prefs.getStringSet(KEY_CUSTOM, emptySet())?.toMutableSet() ?: mutableSetOf()
-                  current.add(url)
-                  prefs.edit().putStringSet(KEY_CUSTOM, current).apply()
+                  current.add(url); prefs.edit().putStringSet(KEY_CUSTOM, current).apply()
               }
-
               fun removeCustomUrl(ctx: Context, url: String) {
                   val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
                   val current = prefs.getStringSet(KEY_CUSTOM, emptySet())?.toMutableSet() ?: mutableSetOf()
-                  current.remove(url)
-                  prefs.edit().putStringSet(KEY_CUSTOM, current).apply()
+                  current.remove(url); prefs.edit().putStringSet(KEY_CUSTOM, current).apply()
               }
-
               fun getActiveUrls(ctx: Context): List<String> {
                   val enabled = getEnabledNames(ctx)
                   return DEFAULT_SOURCES.filter { enabled.contains(it.name) }.map { it.url } + getCustomUrls(ctx)
@@ -348,6 +464,7 @@ jobs:
           package com.gvineon550.smartblock
 
           import android.app.Activity
+          import android.app.AlertDialog
           import android.content.Intent
           import android.net.VpnService
           import android.os.Bundle
@@ -390,6 +507,9 @@ jobs:
                       Toast.makeText(context, "Обновление запущено...", Toast.LENGTH_SHORT).show()
                       thread { HostsUpdater.update(requireContext()) }
                   }
+                  view.findViewById<Button>(R.id.testButton).setOnClickListener {
+                      runSelfTest()
+                  }
                   val handler = Handler(Looper.getMainLooper())
                   handler.post(object : Runnable {
                       override fun run() {
@@ -398,6 +518,22 @@ jobs:
                       }
                   })
               }
+
+              private fun runSelfTest() {
+                  Toast.makeText(context, "Выполняется диагностика...", Toast.LENGTH_SHORT).show()
+                  thread {
+                      val results = SelfTest.runAll(requireContext())
+                      val text = SelfTest.formatResults(results)
+                      activity?.runOnUiThread {
+                          AlertDialog.Builder(requireContext())
+                              .setTitle("🧪 Диагностика")
+                              .setMessage(text)
+                              .setPositiveButton("Ок", null)
+                              .show()
+                      }
+                  }
+              }
+
               private fun startVpn() {
                   androidx.core.content.ContextCompat.startForegroundService(requireContext(), Intent(requireContext(), DnsVpnService::class.java))
                   DnsVpnService.isRunning = true
@@ -513,10 +649,7 @@ jobs:
                       }
                   }
 
-                  fileBtn.setOnClickListener {
-                      filePicker.launch(arrayOf("text/plain", "*/*"))
-                  }
-
+                  fileBtn.setOnClickListener { filePicker.launch(arrayOf("text/plain", "*/*")) }
                   blockBtn.setOnClickListener {
                       val d = input.text.toString().trim().lowercase()
                       if (d.isNotEmpty()) { FilterEngine.addBlocked(d, requireContext()); input.text.clear(); refreshLists() }
@@ -525,7 +658,6 @@ jobs:
                       val d = input.text.toString().trim().lowercase()
                       if (d.isNotEmpty()) { FilterEngine.addWhitelist(d, requireContext()); input.text.clear(); refreshLists() }
                   }
-
                   importBtn.setOnClickListener {
                       val text = bulkInput.text.toString()
                       val count = parseAndAdd(text)
@@ -557,9 +689,7 @@ jobs:
                               onRefresh()
                           }
                       }
-                      row.addView(tv)
-                      row.addView(btn)
-                      container.addView(row)
+                      row.addView(tv); row.addView(btn); container.addView(row)
                   }
               }
           }
@@ -606,7 +736,6 @@ jobs:
                   DnsVpnService.setDoHProvider(prefs.getInt("doh_provider", 0))
                   swDoh.isChecked = DnsVpnService.useDoH
                   swAuto.isChecked = prefs.getBoolean("auto_start", false)
-
                   swDoh.setOnCheckedChangeListener { _, on -> DnsVpnService.useDoH = on }
                   swAuto.setOnCheckedChangeListener { _, on -> prefs.edit().putBoolean("auto_start", on).apply() }
                   spinner.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -620,17 +749,13 @@ jobs:
                       sourcesContainer.removeAllViews()
                       HostsSources.DEFAULT_SOURCES.forEach { source ->
                           val row = LinearLayout(requireContext())
-                          row.orientation = LinearLayout.HORIZONTAL
-                          row.gravity = Gravity.CENTER_VERTICAL
-                          row.setPadding(0, 16, 0, 16)
+                          row.orientation = LinearLayout.HORIZONTAL; row.gravity = Gravity.CENTER_VERTICAL; row.setPadding(0, 16, 0, 16)
                           val textContainer = LinearLayout(requireContext())
                           textContainer.orientation = LinearLayout.VERTICAL
                           textContainer.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-                          val nameText = TextView(requireContext())
-                          nameText.text = source.name; nameText.setTextColor(Color.WHITE); nameText.textSize = 16f
+                          val nameText = TextView(requireContext()).apply { text = source.name; setTextColor(Color.WHITE); textSize = 16f }
                           textContainer.addView(nameText)
-                          val descText = TextView(requireContext())
-                          descText.text = source.description; descText.setTextColor(Color.GRAY); descText.textSize = 12f
+                          val descText = TextView(requireContext()).apply { text = source.description; setTextColor(Color.GRAY); textSize = 12f }
                           textContainer.addView(descText)
                           row.addView(textContainer)
                           val sw = SwitchCompat(requireContext())
@@ -640,8 +765,7 @@ jobs:
                           sourcesContainer.addView(row)
                           val divider = View(requireContext())
                           divider.layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
-                          divider.setBackgroundColor(Color.parseColor("#333333"))
-                          sourcesContainer.addView(divider)
+                          divider.setBackgroundColor(Color.parseColor("#333333")); sourcesContainer.addView(divider)
                       }
                   }
                   refreshSources()
@@ -650,25 +774,18 @@ jobs:
                       customUrlsContainer.removeAllViews()
                       val urls = HostsSources.getCustomUrls(requireContext())
                       if (urls.isEmpty()) {
-                          val tv = TextView(requireContext())
-                          tv.text = "Нет своих источников"; tv.setTextColor(Color.GRAY)
-                          customUrlsContainer.addView(tv)
-                          return
+                          val tv = TextView(requireContext()).apply { text = "Нет своих источников"; setTextColor(Color.GRAY) }
+                          customUrlsContainer.addView(tv); return
                       }
                       urls.forEach { url ->
-                          val row = LinearLayout(requireContext())
-                          row.orientation = LinearLayout.HORIZONTAL
-                          row.gravity = Gravity.CENTER_VERTICAL
-                          row.setPadding(0, 8, 0, 8)
-                          val urlText = TextView(requireContext())
-                          urlText.text = url; urlText.setTextColor(Color.LTGRAY); urlText.textSize = 12f
-                          urlText.layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+                          val row = LinearLayout(requireContext()).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL; setPadding(0, 8, 0, 8) }
+                          val urlText = TextView(requireContext()).apply { text = url; setTextColor(Color.LTGRAY); textSize = 12f; layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
                           row.addView(urlText)
-                          val delBtn = Button(requireContext())
-                          delBtn.text = "✕"; delBtn.setTextColor(Color.WHITE); delBtn.setBackgroundColor(Color.TRANSPARENT)
-                          delBtn.setOnClickListener { HostsSources.removeCustomUrl(requireContext(), url); refreshCustomUrls() }
-                          row.addView(delBtn)
-                          customUrlsContainer.addView(row)
+                          val delBtn = Button(requireContext()).apply {
+                              text = "✕"; setTextColor(Color.WHITE); setBackgroundColor(Color.TRANSPARENT)
+                              setOnClickListener { HostsSources.removeCustomUrl(requireContext(), url); refreshCustomUrls() }
+                          }
+                          row.addView(delBtn); customUrlsContainer.addView(row)
                       }
                   }
                   refreshCustomUrls()
@@ -693,7 +810,6 @@ jobs:
                               HostsUpdater.loadCached(requireContext()); refreshCacheInfo()
                           }.setNegativeButton("Отмена", null).show()
                   }
-
                   view.findViewById<Button>(R.id.updateButton).setOnClickListener {
                       Toast.makeText(context, "Обновление запущено...", Toast.LENGTH_SHORT).show()
                       kotlin.concurrent.thread { HostsUpdater.update(requireContext()); activity?.runOnUiThread { refreshCacheInfo() } }
@@ -843,6 +959,7 @@ jobs:
                   private val DOH_PROVIDERS = listOf("https://dns.adguard-dns.com/dns-query", "https://dns.comss.one/dns-query", "https://dns.turtleguard.cloud/dns-query", "https://doh.openbld.net/dns-query", "https://dns.quad9.net/dns-query")
                   private var currentProvider = 0
                   fun setDoHProvider(index: Int) { if (index in DOH_PROVIDERS.indices) currentProvider = index }
+                  fun getCurrentDoHProviderUrl(): String = DOH_PROVIDERS[currentProvider]
               }
               private var vpn: ParcelFileDescriptor? = null
               private var worker: Thread? = null
@@ -859,14 +976,12 @@ jobs:
                   isRunning = true; worker = Thread { run() }.also { it.start() }
                   return START_STICKY
               }
-
               private fun acquireLocks() {
                   val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
                   wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "SmartBlock::WakeLock"); wakeLock?.acquire(10 * 60 * 1000L)
                   val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
                   wifiLock = wm.createWifiLock(WifiManager.WIFI_MODE_FULL_HIGH_PERF, "SmartBlock::WifiLock"); wifiLock?.acquire()
               }
-
               private fun run() {
                   val pfd = vpn ?: return
                   FileInputStream(pfd.fileDescriptor).use { input ->
@@ -879,7 +994,6 @@ jobs:
                       }
                   }
               }
-
               private fun handle(pkt: ByteArray, out: FileOutputStream, sock: DatagramSocket) {
                   if (pkt.size < 28) return
                   if (((pkt[0].toInt() ushr 4) and 0xF) == 4 && (pkt[9].toInt() and 0xFF) == 17) {
@@ -895,7 +1009,6 @@ jobs:
                       processDns(dns, out, sock, dstIp, srcIp, srcPort)
                   }
               }
-
               private fun processDns(dns: ByteArray, out: FileOutputStream, sock: DatagramSocket, dstIp: ByteArray, srcIp: ByteArray, srcPort: Int) {
                   val domain = DnsPacket.parseDomain(dns) ?: return
                   if (FilterEngine.isBlocked(domain)) {
@@ -906,7 +1019,6 @@ jobs:
                   if (cached != null) { out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, cached)); return }
                   if (useDoH) sendDoH(dns, out, dstIp, srcIp, srcPort, domain) else sendUDP(dns, out, sock, dstIp, srcIp, srcPort, domain)
               }
-
               private fun sendUDP(dns: ByteArray, out: FileOutputStream, sock: DatagramSocket, dstIp: ByteArray, srcIp: ByteArray, srcPort: Int, key: String) {
                   try {
                       sock.send(DatagramPacket(dns, dns.size, upstream, 53))
@@ -915,7 +1027,6 @@ jobs:
                       out.write(buildIpUdp(dstIp, srcIp, 53, srcPort, resp))
                   } catch (e: Exception) {}
               }
-
               private fun sendDoH(dns: ByteArray, out: FileOutputStream, dstIp: ByteArray, srcIp: ByteArray, srcPort: Int, key: String) {
                   try {
                       val body = dns.toRequestBody("application/dns-message".toMediaType())
@@ -928,7 +1039,6 @@ jobs:
                       }
                   } catch (e: Exception) { val s = DatagramSocket(); protect(s); sendUDP(dns, out, s, dstIp, srcIp, srcPort, key); s.close() }
               }
-
               private fun buildIpUdp(src: ByteArray, dst: ByteArray, sp: Int, dp: Int, payload: ByteArray): ByteArray {
                   val udpLen = 8 + payload.size; val p = ByteArray(20 + udpLen)
                   p[0] = 0x45; p[2] = ((p.size shr 8) and 0xFF).toByte(); p[3] = (p.size and 0xFF).toByte(); p[6] = 0x40; p[8] = 64; p[9] = 17
@@ -939,7 +1049,6 @@ jobs:
                   p[24] = ((udpLen shr 8) and 0xFF).toByte(); p[25] = (udpLen and 0xFF).toByte()
                   System.arraycopy(payload, 0, p, 28, payload.size); return p
               }
-
               override fun onRevoke() { isRunning = false; stopSelf(); super.onRevoke() }
               override fun onDestroy() {
                   isRunning = false; worker?.interrupt(); vpn?.close(); vpn = null
@@ -995,23 +1104,18 @@ jobs:
                   val cur = p.getStringSet("user_block", emptySet())?.toMutableSet() ?: mutableSetOf()
                   cur.add(d); p.edit().putStringSet("user_block", cur).apply()
               }
-
               fun addWhitelist(domain: String, ctx: Context) {
                   val d = domain.lowercase().trim(); whitelist.add(d)
                   val p = ctx.getSharedPreferences("smartblock", Context.MODE_PRIVATE)
                   val cur = p.getStringSet("user_white", emptySet())?.toMutableSet() ?: mutableSetOf()
                   cur.add(d); p.edit().putStringSet("user_white", cur).apply()
               }
-
-              fun removeBlocked(domain: String) {
-                  val d = domain.lowercase().trim(); exact.remove(d); suffixes.remove(d)
-              }
-
-              fun removeWhitelist(domain: String) {
-                  val d = domain.lowercase().trim(); whitelist.remove(d)
-              }
-
+              fun removeBlocked(domain: String) { val d = domain.lowercase().trim(); exact.remove(d); suffixes.remove(d) }
+              fun removeWhitelist(domain: String) { val d = domain.lowercase().trim(); whitelist.remove(d) }
               fun addAll(domains: Collection<String>) { domains.forEach { if (it.isNotBlank()) { exact.add(it); suffixes.add(it) } } }
+
+              fun getDomainCount(): Int = exact.size
+              fun getWhitelistSample(): String? = whitelist.firstOrNull()
           }
           EOF
 
@@ -1025,7 +1129,6 @@ jobs:
           object HostsUpdater {
               private const val PREFS = "smartblock_hosts"
               private const val KEY_CACHE = "cached_domains"
-
               fun update(ctx: Context): Int {
                   val all = mutableSetOf<String>()
                   val sources = HostsSources.getActiveUrls(ctx)
@@ -1033,7 +1136,7 @@ jobs:
                       try {
                           val conn = URL(url).openConnection() as HttpURLConnection
                           conn.connectTimeout = 15000; conn.requestMethod = "GET"
-                          conn.setRequestProperty("User-Agent", "SmartBlock/4.3")
+                          conn.setRequestProperty("User-Agent", "SmartBlock/4.4")
                           conn.inputStream.bufferedReader().useLines { lines ->
                               lines.forEach { l ->
                                   val parts = l.trim().substringBefore('#').trim().split(Regex("\\s+"))
@@ -1047,12 +1150,10 @@ jobs:
                   if (all.isNotEmpty()) { FilterEngine.addAll(all); saveCache(ctx, all) }
                   return all.size
               }
-
               fun loadCached(ctx: Context) {
                   val raw = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString(KEY_CACHE, null) ?: return
                   FilterEngine.addAll(raw.split('\n').filter { it.isNotBlank() })
               }
-
               private fun saveCache(ctx: Context, domains: Set<String>) {
                   ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(KEY_CACHE, domains.joinToString("\n")).apply()
               }
@@ -1113,7 +1214,8 @@ jobs:
                       </LinearLayout>
                   </com.google.android.material.card.MaterialCardView>
                   <TextView android:id="@+id/statsText" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Заблокировано: 0" android:textColor="#FFB74D" android:textSize="16sp" android:paddingBottom="16dp"/>
-                  <Button android:id="@+id/updateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить списки" android:backgroundTint="#03DAC6" android:textColor="#000000"/>
+                  <Button android:id="@+id/updateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить списки" android:backgroundTint="#03DAC6" android:textColor="#000000" android:layout_marginBottom="8dp"/>
+                  <Button android:id="@+id/testButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="🧪 Проверить работу" android:backgroundTint="#BB86FC" android:textColor="#000000"/>
               </LinearLayout>
           </ScrollView>
           EOF
@@ -1131,7 +1233,6 @@ jobs:
           cat > app/src/main/res/layout/fragment_lists.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="#121212" android:padding="16dp">
-              
               <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="8dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
                   <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                       <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Добавить один домен" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
@@ -1142,7 +1243,6 @@ jobs:
                       </LinearLayout>
                   </LinearLayout>
               </com.google.android.material.card.MaterialCardView>
-
               <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="8dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
                   <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                       <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Импорт из файла или текста" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
@@ -1153,7 +1253,6 @@ jobs:
                       </LinearLayout>
                   </LinearLayout>
               </com.google.android.material.card.MaterialCardView>
-
               <ScrollView android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1">
                   <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
                       <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Черный список:" android:textColor="#EF5350" android:textStyle="bold"/>
@@ -1169,7 +1268,6 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <ScrollView xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#121212">
               <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
-                  
                   <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
                       <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                           <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="DNS-сервер (DoH)" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
@@ -1178,7 +1276,6 @@ jobs:
                           <androidx.appcompat.widget.SwitchCompat android:id="@+id/autoStartSwitch" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Автозапуск при загрузке" android:textColor="#FFFFFF"/>
                       </LinearLayout>
                   </com.google.android.material.card.MaterialCardView>
-
                   <com.google.android.material.card.MaterialCardView android:layout_width="match_parent" android:layout_height="wrap_content" app:cardBackgroundColor="#1E1E1E" app:cardCornerRadius="16dp" android:layout_marginBottom="16dp" xmlns:app="http://schemas.android.com/apk/res-auto">
                       <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:padding="16dp">
                           <TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Источники хостов" android:textColor="#FFFFFF" android:textStyle="bold" android:paddingBottom="8dp"/>
@@ -1192,12 +1289,10 @@ jobs:
                           </LinearLayout>
                       </LinearLayout>
                   </com.google.android.material.card.MaterialCardView>
-
                   <Button android:id="@+id/updateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Обновить все списки" android:backgroundTint="#03DAC6" android:textColor="#000000" android:layout_marginBottom="8dp"/>
                   <Button android:id="@+id/clearCacheBtn" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Очистить кэш списков" android:backgroundTint="#EF5350" android:textColor="#FFFFFF" android:layout_marginBottom="8dp"/>
                   <Button android:id="@+id/batteryButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Разрешить работу в фоне" android:backgroundTint="#81C784" android:textColor="#000000" android:layout_marginBottom="8dp"/>
                   <Button android:id="@+id/checkUpdateButton" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Проверить обновления приложения" android:backgroundTint="#FFB74D" android:textColor="#000000" android:layout_marginBottom="16dp"/>
-
               </LinearLayout>
           </ScrollView>
           EOF
@@ -1217,9 +1312,9 @@ jobs:
 
       - name: Set version from run number
         run: |
-          VERSION_NAME="4.3.${{ github.run_number }}"
-          sed -i "s/versionCode = 9/versionCode = ${{ github.run_number }}/" app/build.gradle.kts
-          sed -i "s/versionName = \"4.3\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
+          VERSION_NAME="4.4.${{ github.run_number }}"
+          sed -i "s/versionCode = 10/versionCode = ${{ github.run_number }}/" app/build.gradle.kts
+          sed -i "s/versionName = \"4.4\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
       - uses: android-actions/setup-android@v4
         with: { packages: 'platforms;android-34' }
@@ -1230,18 +1325,20 @@ jobs:
         run: gradle assembleRelease --no-daemon
 
       - name: Prepare APK
-        run: cp app/build/outputs/apk/release/app-release.apk "SmartBlock-v4.3.${{ github.run_number }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "SmartBlock-v4.4.${{ github.run_number }}.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v4.3.${{ github.run_number }}
-          name: SmartBlock v4.3.${{ github.run_number }}
+          tag_name: v4.4.${{ github.run_number }}
+          name: SmartBlock v4.4.${{ github.run_number }}
           body: |
-            🚀 **SmartBlock v4.3 (Импорт из файла)**
+            🚀 **SmartBlock v4.4 (Диагностика)**
 
             **Что нового:**
-            - 📁 **Выбор файла**: На вкладке "Списки" появилась кнопка "Выбрать файл". Вы можете загрузить любой `.txt` или `.hosts` файл из памяти телефона, и приложение автоматически добавит все домены из него в черный список.
+            - 🧪 **Кнопка «Проверить работу»** на главном экране. Запускает 5 тестов: VPN, списки, перехват DNS, белый список, DoH.
+            - 🔍 Каждый тест показывает статус ✅ (пройден), ❌ (провал) или ⏭️ (пропущен).
+            - 🛠️ Помогает быстро найти проблему: не включён VPN, пустые списки, недоступный DoH-сервер.
           files: SmartBlock-v*.apk
           draft: false
           prerelease: false
