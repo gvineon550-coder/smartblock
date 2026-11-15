@@ -76,8 +76,8 @@ jobs:
                   applicationId = "com.gvineon550.smartblock"
                   minSdk = 24
                   targetSdk = 34
-                  versionCode = 10
-                  versionName = "4.4"
+                  versionCode = 11
+                  versionName = "4.4.1"
               }
               signingConfigs {
                   create("release") {
@@ -398,9 +398,9 @@ jobs:
                   var passed = 0; var failed = 0; var skipped = 0
                   results.forEach { r ->
                       val icon = when (r.status) {
-                          Status.PASSED -> "✅"; passed++
-                          Status.FAILED -> "❌"; failed++
-                          Status.SKIPPED -> "⏭️"; skipped++
+                          Status.PASSED -> { passed++; "✅" }
+                          Status.FAILED -> { failed++; "❌" }
+                          Status.SKIPPED -> { skipped++; "⏭️" }
                       }
                       sb.append("$icon ${r.name}\n     ${r.details}\n\n")
                   }
@@ -507,9 +507,7 @@ jobs:
                       Toast.makeText(context, "Обновление запущено...", Toast.LENGTH_SHORT).show()
                       thread { HostsUpdater.update(requireContext()) }
                   }
-                  view.findViewById<Button>(R.id.testButton).setOnClickListener {
-                      runSelfTest()
-                  }
+                  view.findViewById<Button>(R.id.testButton).setOnClickListener { runSelfTest() }
                   val handler = Handler(Looper.getMainLooper())
                   handler.post(object : Runnable {
                       override fun run() {
@@ -1136,7 +1134,7 @@ jobs:
                       try {
                           val conn = URL(url).openConnection() as HttpURLConnection
                           conn.connectTimeout = 15000; conn.requestMethod = "GET"
-                          conn.setRequestProperty("User-Agent", "SmartBlock/4.4")
+                          conn.setRequestProperty("User-Agent", "SmartBlock/4.4.1")
                           conn.inputStream.bufferedReader().useLines { lines ->
                               lines.forEach { l ->
                                   val parts = l.trim().substringBefore('#').trim().split(Regex("\\s+"))
@@ -1312,9 +1310,9 @@ jobs:
 
       - name: Set version from run number
         run: |
-          VERSION_NAME="4.4.${{ github.run_number }}"
-          sed -i "s/versionCode = 10/versionCode = ${{ github.run_number }}/" app/build.gradle.kts
-          sed -i "s/versionName = \"4.4\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
+          VERSION_NAME="4.4.1.${{ github.run_number }}"
+          sed -i "s/versionCode = 11/versionCode = ${{ github.run_number }}/" app/build.gradle.kts
+          sed -i "s/versionName = \"4.4.1\"/versionName = \"${VERSION_NAME}\"/" app/build.gradle.kts
 
       - uses: android-actions/setup-android@v4
         with: { packages: 'platforms;android-34' }
@@ -1325,20 +1323,17 @@ jobs:
         run: gradle assembleRelease --no-daemon
 
       - name: Prepare APK
-        run: cp app/build/outputs/apk/release/app-release.apk "SmartBlock-v4.4.${{ github.run_number }}.apk"
+        run: cp app/build/outputs/apk/release/app-release.apk "SmartBlock-v4.4.1.${{ github.run_number }}.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v4.4.${{ github.run_number }}
-          name: SmartBlock v4.4.${{ github.run_number }}
+          tag_name: v4.4.1.${{ github.run_number }}
+          name: SmartBlock v4.4.1.${{ github.run_number }}
           body: |
-            🚀 **SmartBlock v4.4 (Диагностика)**
-
-            **Что нового:**
-            - 🧪 **Кнопка «Проверить работу»** на главном экране. Запускает 5 тестов: VPN, списки, перехват DNS, белый список, DoH.
-            - 🔍 Каждый тест показывает статус ✅ (пройден), ❌ (провал) или ⏭️ (пропущен).
-            - 🛠️ Помогает быстро найти проблему: не включён VPN, пустые списки, недоступный DoH-сервер.
+            🛠 **SmartBlock v4.4.1 (Багфикс)**
+            - Исправлена ошибка компиляции в `SelfTest.kt` (синтаксис Kotlin).
+            - Добавлена встроенная диагностика работы.
           files: SmartBlock-v*.apk
           draft: false
           prerelease: false
